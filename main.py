@@ -169,10 +169,6 @@ async def message_reply(message: types.Message, state: FSMContext):
     context, catalog = await extract_gk(param_dict, rpc_client)
 
 
-@dp.message(lambda message: message.content_type == "text")
-async def message_reply(message: types.Message):
-    await message.answer("Я не понимаю что ты говоришь")
-
 # Запуск процесса поллинга новых апдейтов
 async def main():
     await dp.start_polling(bot)
