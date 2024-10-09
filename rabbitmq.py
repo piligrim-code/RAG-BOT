@@ -32,7 +32,7 @@ async def main() -> None:
 
                     message_d = json.loads(message.body.decode())
                     if "extract_bikes" in message_d:
-                        response = db_client.extract_bikes(message_d["extract_bikes"])
+                        response = db_client.extract_catalog(message_d["extract_bikes"])
                     elif "new_dialog" in message_d:
                         response = db_client.new_dialog(**message_d["new_dialog"])
                     elif "add_message" in message_d:

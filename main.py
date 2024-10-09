@@ -1,3 +1,4 @@
+from dotenv import load_dotenv
 import os
 import asyncio
 import logging
@@ -12,22 +13,23 @@ from aiogram.types import KeyboardButton, InlineKeyboardButton, InlineKeyboardMa
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from rabbitclient import RpcClient
+from db_calls import extract_gk
+from llm import slot_fill
+
+load_dotenv() 
+
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
 
 rpc_client = RpcClient()
-
-with open('C://Users//User/projects/RAG_bot/bot/dict.json', 'r', encoding='utf-8') as f:
-    dicter = json.load(f)
 
 # Включаем логирование, чтобы не пропустить важные сообщения
 logging.basicConfig(level=logging.INFO)
 
 # Объект бота
-bot = Bot(token="6946572930:AAF1hQEkD7VtYmiHikDepg1P-bVEA4PL7pg")
+bot = Bot(TOKEN)
 # Диспетчер
 dp = Dispatcher()
-
-ADMIN_ID = "-1001904589516"
-
 def make_reply_keyboard(button_name_rows):
     button_rows = []
     for button_name_row in button_name_rows:
@@ -37,12 +39,6 @@ def make_reply_keyboard(button_name_rows):
 
 class AskQuestion(StatesGroup):
     question = State()
-
-# Хэндлер на команду /start
-# @dp.message(Command("start"))
-# async def cmd_start(message: types.Message):
-#     keyboard = make_reply_keyboard([["Посмотреть каталог"], ["Связь с оператором"]])
-#     await message.answer("Добрый день! Что бы вы хотели??", reply_markup=keyboard)
 
 @dp.message(Command("start"))
 async def start_func(message: types.Message, state: FSMContext):
@@ -163,7 +159,16 @@ async def process_question(message: types.Message, state: FSMContext):
     await message.answer("Оператор скоро вам напишет, ожидайте.", reply_markup=ReplyKeyboardRemove())
     await state.clear()
 
-# Хэндлер для обработки произвольных текстовых сообщений
+@dp.message(F.content_type == ContentType.TEXT)
+async def message_reply(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    user_id = message.from_user.id
+    dialog_id = user_data["dialog_id"]
+    messages = user_data.get("messages", [])
+    param_dict = await slot_fill(user_data, message)
+    context, catalog = await extract_gk(param_dict, rpc_client)
+
+
 @dp.message(lambda message: message.content_type == "text")
 async def message_reply(message: types.Message):
     await message.answer("Я не понимаю что ты говоришь")

@@ -1,16 +1,29 @@
-from tqdm.autonotebook import tqdm
 import os
 import requests
+import uvicorn
+from fastapi import FastAPI
 from pydantic import BaseModel
+from openai import OpenAI
+from llama_cpp import Llama
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.embeddings.huggingface import HuggingFaceEmbeddings
-from bot.db_client import DBClient
+from langchain.embeddings import HuggingFaceEmbeddings
+from db_client import DBClient
+
+model_name = os.getenv("MODEL_NAME")
+model_path = "./data/llama-2-13b.Q2_K.gguf"
+llama = Llama(
+    model_path=model_path, 
+    n_ctx=8192,
+    n_threads=8,
+    n_gpu_layers=35,
+    chat_format="llama-2"
+    )
+
 if os.path.exists("/data/catalog_vectordb"):
     vectordb = Chroma(
         persist_directory="/data/catalog_vectordb",
-        embedding_function=OpenAIEmbeddings()
+        embedding_function=HuggingFaceEmbeddings()
     )
 else:
     db_client = DBClient()
@@ -29,3 +42,39 @@ else:
 
 vectordb.persist()
 retriever = vectordb.as_retriever(search_kwargs={"k": 5})
+
+app = FastAPI()
+
+class Prompt(BaseModel):
+    content: str | list
+
+
+class Query(BaseModel):
+    content: str
+
+
+@app.post("/generate")
+def execute_prompt(prompt: Prompt):
+    content = prompt.content
+    if isinstance(content, str):
+        messages = [{"role": "system", "content": content}]
+    else:
+        messages = content
+        response = llama.create_chat_completion(messages=messages)
+        res_content = response["choices"][0]["message"]["content"]
+    return {"res_content": res_content}
+
+
+@app.post("/retrieve")
+def execute_prompt(query: Query):
+    content = query.content
+    res = retriever.get_relevant_documents(query=content)
+    retr_elements = []
+    for element in res:
+        if element.page_content not in retr_elements:
+            retr_elements.append(element.page_content)
+    return {"response": retr_elements}
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="localhost", port=8015)

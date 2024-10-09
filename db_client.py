@@ -15,9 +15,9 @@ database = ("postgres")
 Base = declarative_base()
 
 class Catalog(Base):
-    __tablename__ = 'products'
-    name = Column(String(100), primary_key = True)
-    category = Column(String(100))
+    __tablename__ = 'products_trio'
+    art = Column(String(100), primary_key = True)
+    cat = Column(String(100))
     descr = Column(String(100))
     price = Column(Integer())
 
@@ -38,16 +38,16 @@ class DBClient:
 
         Session = sessionmaker(bind=engine)
         self.session = Session()
-    def extract_bikes(self, parameters=None):
+    def extract_catalog(self, parameters=None):
         f_catalog = self.session.query(Catalog)
         print(f"Query: {f_catalog}")
         if parameters:
             for param_name, param_value in parameters.items():
                 if param_name == "Артикул":
-                    f_catalog = f_catalog.filter(func.lower(Catalog.name) == func.lower(param_value))
+                    f_catalog = f_catalog.filter(func.lower(Catalog.art) == func.lower(param_value))
                     break
                 elif param_name == "Категория":
-                    f_catalog = f_catalog.filter(func.lower(Catalog.category) == func.lower(param_value))
+                    f_catalog = f_catalog.filter(func.lower(Catalog.cat) == func.lower(param_value))
                 elif param_name == "Описание":
                     f_catalog = f_catalog.filter(func.lower(Catalog.descr) == func.lower(param_value))
                 elif param_name == "Цена":
@@ -61,8 +61,8 @@ class DBClient:
         f_catalog_dicts = []
         for f_cat in f_catalog:
             f_catalog_dicts.append({
-                "Артикул": f_cat.name,
-                "Категория": f_cat.category,
+                "Артикул": f_cat.art,
+                "Категория": f_cat.cat,
                 "Описание": f_cat.descr,
                 "Цена": f_cat.price
             })
