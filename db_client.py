@@ -7,11 +7,13 @@ from sqlalchemy.engine import URL
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 
-username = ("postgres")
-password = ("123456")
-host = ("localhost")
-port = ("5432")
-database = ("postgres")
+
+username = os.getenv("username")
+password = os.getenv("password")
+host = os.getenv("host")
+port = os.getenv("port")
+database = os.getenv("database")
+
 Base = declarative_base()
 
 class Catalog(Base):
@@ -79,3 +81,4 @@ class DBClient:
         message = Message(dialog_id=dialog_uuid, role=role, text=message)
         self.session.add(message)
         self.session.commit()
+        #r

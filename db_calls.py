@@ -15,3 +15,4 @@ async def extract_gk(slots, rpc_client):
         context.append(catalog_descr)
     context = "\n\n".join(context).strip()
     return context, catalog
+#r

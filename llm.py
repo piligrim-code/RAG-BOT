@@ -69,3 +69,4 @@ async def slot_fill(user_data, message):
     with open("/data/log.txt", 'a') as out:
         out.write(f"slot_fill, param_dict: {param_dict}"+'\n')
     return param_dict
+#r

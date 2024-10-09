@@ -51,3 +51,4 @@ async def main() -> None:
                 logging.exception("Processing error for message %r", message)
 if __name__ == "__main__":
     asyncio.run(main())
+#r

@@ -78,3 +78,4 @@ def execute_prompt(query: Query):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="localhost", port=8015)
+#r
