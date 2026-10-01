@@ -42,7 +42,6 @@ class DBClient:
         self.session = Session()
     def extract_catalog(self, parameters=None):
         f_catalog = self.session.query(Catalog)
-        print(f"Query: {f_catalog}")
         if parameters:
             for param_name, param_value in parameters.items():
                 if param_name == "Артикул":
@@ -59,7 +58,6 @@ class DBClient:
                         elif sign == ">":
                             f_catalog = f_catalog.filter(Catalog.price > value)
         f_catalog = f_catalog.all()
-        print(f"Result: {f_catalog}")  
         f_catalog_dicts = []
         for f_cat in f_catalog:
             f_catalog_dicts.append({

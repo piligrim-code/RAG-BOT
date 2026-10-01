@@ -2,6 +2,7 @@ import aiohttp
 import json
 import logging
 import re
+import os
 """messages = [
     {"role": "system", "content": SYSTEM_PROMPT},
     {"role": "user", "content": "some text"},
@@ -40,12 +41,13 @@ async def slot_fill(user_data, message):
         last_messages.append(f"Реплика консультанта: {messages[-1]}")
     last_messages.append(f"Реплика покупателя: {message.text}")
     prompt = PROMPT_EXTRACT_TEMPLATE.format(instruction=EXTRACT_INSTRUCTION, replicas="\n".join(last_messages))
-    async with aiohttp.ClientSession() as session:
-        response = await session.post("http://localhost:8015/generate", json={"content": prompt})
+    url = os.environ.get("LLM_URL")
+    if not url:
+        raise ValueError("Set LLM_URL before requesting model output")
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        response = await session.post(url, json={"content": prompt})
+        response.raise_for_status()
         response = await response.json()
-
-    with open("/data/log.txt", 'a') as out:
-        out.write(f"slot_fill, response: {response}"+'\n')
 
     lines = response["res_content"].split("\n")
     lines = [line.strip() for line in lines]
@@ -64,9 +66,9 @@ async def slot_fill(user_data, message):
             new_param_dict = json.loads(response)
         except Exception as e:
             logging.error(f"Error in parameter loading: {e}")
+    if not isinstance(new_param_dict, dict):
+        raise ValueError("Model filters must be an object")
     for param_name, param_value in new_param_dict.items():
         param_dict[param_name] = param_value
-    with open("/data/log.txt", 'a') as out:
-        out.write(f"slot_fill, param_dict: {param_dict}"+'\n')
     return param_dict
 #r

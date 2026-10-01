@@ -1,54 +1,45 @@
 import asyncio
 import json
 import logging
+import os
+
 from aio_pika import Message, connect_robust
-from aio_pika.abc import AbstractIncomingMessage
-from db_client import DBClient
+from catalog_service import dispatch_catalog_request
 
-db_client = DBClient()
 
-async def main() -> None:
-    # Perform connection
-    connection = await connect_robust("amqp://guest:guest@localhost:5672/")
-
-    # Creating a channel
-    channel = await connection.channel()
-
-    exchange = channel.default_exchange
-
-    # Declaring queue
-    queue = await channel.declare_queue("catalog_store")
-
-    print(" [x] Awaiting RPC requests")
-
-    # Start listening the queue with name 'hello'
-    async with queue.iterator() as qiterator:
-        message: AbstractIncomingMessage
-        async for message in qiterator:
-            print("ok")
-            try:
+async def main():
+    from dotenv import load_dotenv
+    load_dotenv()
+    url = os.environ.get("RABBITMQ_URL")
+    if not url:
+        raise ValueError("Set RABBITMQ_URL before starting the worker")
+    # Importing this module for contract tests must not open a database.
+    from db_client import DBClient
+    database = DBClient()
+    connection = await connect_robust(url, timeout=15)
+    async with connection:
+        channel = await connection.channel()
+        await channel.set_qos(prefetch_count=1)
+        queue = await channel.declare_queue("catalog_store")
+        async with queue.iterator() as requests:
+            async for message in requests:
                 async with message.process(requeue=False):
-                    assert message.reply_to is not None
-
-                    message_d = json.loads(message.body.decode())
-                    if "extract_bikes" in message_d:
-                        response = db_client.extract_catalog(message_d["extract_bikes"])
-                    elif "new_dialog" in message_d:
-                        response = db_client.new_dialog(**message_d["new_dialog"])
-                    elif "add_message" in message_d:
-                        response = db_client.add_message(**message_d["add_message"])
-                    response_enc = json.dumps(response).encode()
-
-                    await exchange.publish(
-                        Message(
-                            body=response_enc,
-                            correlation_id=message.correlation_id,
-                        ),
+                    if not message.reply_to or not message.correlation_id:
+                        continue
+                    try:
+                        request = json.loads(message.body.decode("utf-8"))
+                        response = dispatch_catalog_request(request, database)
+                    except ValueError:
+                        response = {"error": {"code": "invalid_request"}}
+                    except Exception as error:
+                        logging.error("Catalog request failed (%s)", type(error).__name__)
+                        response = {"error": {"code": "internal_error"}}
+                    await channel.default_exchange.publish(
+                        Message(json.dumps(response).encode("utf-8"),
+                                content_type="application/json", correlation_id=message.correlation_id),
                         routing_key=message.reply_to,
                     )
-                    print("Request complete")
-            except Exception:
-                logging.exception("Processing error for message %r", message)
+
+
 if __name__ == "__main__":
     asyncio.run(main())
-#r

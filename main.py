@@ -3,6 +3,7 @@ import os
 import asyncio
 import logging
 import json
+import uuid
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
 from aiogram.filters import BaseFilter
@@ -13,7 +14,7 @@ from aiogram.types import KeyboardButton, InlineKeyboardButton, InlineKeyboardMa
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from rabbitclient import RpcClient
-from db_calls import extract_gk
+from catalog_service import catalog_reply
 from llm import slot_fill
 
 load_dotenv() 
@@ -44,7 +45,7 @@ class AskQuestion(StatesGroup):
 async def start_func(message: types.Message, state: FSMContext):
     await state.clear()
     user_data = await state.get_data()
-    dialog_id = await rpc_client.call({"new_dialog": {"user_id": message.from_user.id}})
+    dialog_id = str(uuid.uuid4())
     messages = user_data.get("messages", [])
     messages.append({"role": "assistant", "content": "Добрый день! Что бы вы хотели??"})
     keyboard = make_reply_keyboard([["Посмотреть каталог"], ["Связь с оператором"]])
@@ -163,15 +164,25 @@ async def process_question(message: types.Message, state: FSMContext):
 async def message_reply(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     user_id = message.from_user.id
-    dialog_id = user_data["dialog_id"]
+    dialog_id = user_data.get("dialog_id")
     messages = user_data.get("messages", [])
-    param_dict = await slot_fill(user_data, message)
-    context, catalog = await extract_gk(param_dict, rpc_client)
+    try:
+        param_dict = await slot_fill(user_data, message)
+        reply = await catalog_reply(param_dict, rpc_client)
+    except Exception as error:
+        logging.warning("Catalog flow failed (%s)", type(error).__name__)
+        await message.answer("Catalog service is unavailable. Please try again later.")
+        return
+    await state.update_data(catalog_params=param_dict)
+    await message.answer(reply)
 
 
 # Запуск процесса поллинга новых апдейтов
 async def main():
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await rpc_client.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
