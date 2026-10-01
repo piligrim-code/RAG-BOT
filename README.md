@@ -27,14 +27,46 @@ python -m pytest tests -q
 
 Tests cover empty/malformed responses, the `extract_catalog` contract,
 callback queues, connection reuse, deadlines, cancellation and pending-call
-cleanup. All broker calls are mocked. CI runs on Python 3.12, Linux and Windows.
+cleanup. The default suite mocks broker calls and uses an in-memory SQLite
+database for SQL/resource tests. Live tests are skipped unless explicitly
+enabled. CI runs the default suite on Python 3.12, Linux and Windows.
+
+## Disposable Integration Test
+
+With a local Linux Docker engine running and test requirements installed:
+
+```sh
+python tools/run_integration.py
+```
+
+This creates dedicated PostgreSQL and RabbitMQ containers with generated
+credentials and randomly allocated loopback-only ports. It inserts two
+synthetic products and tests actual SQL/AMQP request/reply, filters, empty
+results, concurrent clients, malformed requests, SQL failure recovery,
+timeouts, cancellation and a new call after a closed client connection.
+Database sessions are scoped per request; worker shutdown closes its database.
+The PostgreSQL adapter selects the declared psycopg2 driver explicitly and
+bounds each connection attempt to ten seconds.
+
+The runner removes only its labeled containers and their anonymous volumes,
+including on ordinary test failures. Public dependency images stay cached.
+Remote Docker contexts and `DOCKER_HOST` overrides are refused. A hard process
+kill or Docker outage can prevent cleanup; the runner reports any owned names
+that could not be removed. Docker access is privileged: use a trusted local
+engine or disposable CI runner. CI has a separate Linux integration job.
+
+This is not Telegram, LLM, vector-search, TLS, broker-restart failover or
+production-load qualification. The database adapter still uses synchronous
+SQL inside the worker and only the catalog path is supported. Test output
+records dependency image IDs; tags and Python requirement ranges are not a
+fully locked production environment.
 
 ## Corrected Catalog Contract
 
 - Request: `{"extract_catalog": {}}`, response: a JSON array of product objects.
 - Unsupported operations return a generic error envelope; no raw exception or
   request payload is sent back or logged by the worker.
-- The request queue is `catalog_store`; replies use a server-named exclusive
+- The request queue is durable `catalog_store`; replies use a server-named exclusive
   callback queue per client connection. Clients do not consume request messages.
 - Each call has an overall 15-second deadline, including connect and publish.
   Failed/cancelled calls release their correlation entries. Calls are not retried.
@@ -42,6 +74,14 @@ cleanup. All broker calls are mocked. CI runs on Python 3.12, Linux and Windows.
   limited to three products and user-facing text stays below Telegram's limit.
 - The current Telegram path uses an in-memory dialog ID, not the unimplemented
   legacy `new_dialog`/`add_message` database API.
+
+An existing non-durable `catalog_store` cannot be redeclared as durable. For
+that legacy deployment, stop producers, drain/inspect pending work, stop the
+old worker and coordinate queue replacement before starting this version.
+The application never deletes an existing queue or enables deprecated broker
+features automatically. Test only in a disposable environment first. Durable
+queue metadata does not make these transient RPC messages persistent, and the
+client does not promise retries or exactly-once processing.
 
 ## Optional Live Setup
 
@@ -79,4 +119,5 @@ and data-retention policies still need a separate review. The stored legacy
 dialog helper methods reference models not supplied by this snapshot and are
 not part of the corrected catalog contract.
 
-No live Telegram, database, broker or LLM was contacted in the regression suite.
+No Telegram or LLM is contacted in either suite. The opt-in integration suite
+contacts only the disposable local database and broker created by its runner.
