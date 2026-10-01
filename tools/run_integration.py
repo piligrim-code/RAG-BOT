@@ -59,9 +59,11 @@ def run():
             deadline = time.monotonic() + 120
             name = project + "-" + service
             probe = ["pg_isready", "-U", "rag_probe", "-d", env["POSTGRES_DB"]] if service == "postgres" else ["rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+            # A root Erlang CLI can create a root-owned cookie before broker startup.
+            exec_args = ["exec"] if service == "postgres" else ["exec", "--user", "rabbitmq"]
             while True:
                 try:
-                    if docker("exec", name, *probe, check=False, timeout=15).returncode == 0:
+                    if docker(*exec_args, name, *probe, check=False, timeout=15).returncode == 0:
                         break
                 except subprocess.TimeoutExpired:
                     pass

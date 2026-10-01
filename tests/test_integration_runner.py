@@ -25,6 +25,8 @@ class DockerProbe:
             return result("synthetic failure with " + self.secret, 1)
         if args[1:3] == ["context", "inspect"]:
             return result(json.dumps([{"Endpoints": {"docker": {"Host": self.endpoint}}}]))
+        if "rabbitmq-diagnostics" in args:
+            assert args[1:4] == ["exec", "--user", "rabbitmq"]
         if args[1] == "create":
             if self.create_failure:
                 return result(code=1)
