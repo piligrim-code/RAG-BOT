@@ -67,6 +67,10 @@ def run():
                     pass
                 running = docker("inspect", name, "--format", "{{.State.Running}}", timeout=15)
                 if running.stdout.strip() != "true":
+                    state = json.loads(docker("inspect", name, "--format", "{{json .State}}", timeout=15).stdout)
+                    print(json.dumps({"service": service, "exit_code": state.get("ExitCode"), "oom_killed": state.get("OOMKilled")}), flush=True)
+                    diagnostic = docker("logs", "--tail", "30", name, check=False, timeout=15)
+                    print((diagnostic.stdout + diagnostic.stderr).replace(password, "<redacted>"), flush=True)
                     raise RuntimeError("Disposable service exited: " + service)
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Disposable service not ready: " + service)
