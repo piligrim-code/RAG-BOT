@@ -2,11 +2,14 @@ import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, inspect
 
 import db_client
 import rabbitmq
 from catalog_filters import FilterValidationError, PRICE, SKU, CATALOG_LIMIT
+
+CONFIG = dict(username="synthetic-user", password="synthetic-test-only", host="127.0.0.1",
+              port=5432, database="synthetic-catalog")
 
 
 @pytest.fixture
@@ -22,7 +25,7 @@ def database(monkeypatch):
         assert kwargs["pool_size"] == 2 and kwargs["max_overflow"] == 0
         return engine
     monkeypatch.setattr(db_client, "create_engine", engine_factory)
-    client = db_client.DBClient()
+    client = db_client.DBClient(**CONFIG, create_schema=True)
     with client.Session.begin() as session:
         session.add_all([
             db_client.Catalog(art="probe-a", cat="Alpha", descr="synthetic", price=10),
@@ -98,7 +101,7 @@ def test_failed_schema_initialization_disposes_engine(monkeypatch):
     monkeypatch.setattr(db_client, "create_engine", lambda url, **kwargs: engine)
     monkeypatch.setattr(db_client.Base.metadata, "create_all", Mock(side_effect=RuntimeError("synthetic")))
     with pytest.raises(RuntimeError):
-        db_client.DBClient()
+        db_client.DBClient(**CONFIG, create_schema=True)
     engine.dispose.assert_called_once_with()
 
 
@@ -111,18 +114,118 @@ def test_invalid_deadlines_do_not_create_engine(monkeypatch, options):
     factory = Mock()
     monkeypatch.setattr(db_client, "create_engine", factory)
     with pytest.raises(ValueError):
-        db_client.DBClient(**options)
+        db_client.DBClient(**CONFIG, **options)
     factory.assert_not_called()
 
 
-def test_close_disposes_even_if_session_close_fails():
+def test_close_is_final_and_does_not_keep_a_shared_session():
     client = db_client.DBClient.__new__(db_client.DBClient)
-    client.session = Mock()
+    client._closed = False
     client.engine = Mock()
-    client.session.close.side_effect = RuntimeError("synthetic")
-    with pytest.raises(RuntimeError):
-        client.close()
+    client.close()
+    client.close()
     client.engine.dispose.assert_called_once_with()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.extract_catalog()
+    assert not hasattr(client, "session") and not hasattr(client, "new_dialog") and not hasattr(client, "add_message")
+
+
+@pytest.mark.parametrize("field", list(CONFIG))
+def test_missing_configuration_fails_before_engine_creation(monkeypatch, field):
+    for key, value in CONFIG.items():
+        monkeypatch.setenv(key, str(value))
+    monkeypatch.delenv(field)
+    factory = Mock()
+    monkeypatch.setattr(db_client, "create_engine", factory)
+    with pytest.raises(ValueError):
+        db_client.DBClient()
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("field,value", [("username", ""), ("database", None), ("password", None),
+    ("password", "synthetic\nprivate"), ("host", " "), ("port", True), ("port", 0),
+    ("port", 65536), ("port", "not-a-port"), ("port", 5432.0), ("port", "+5432")])
+def test_explicit_invalid_config_does_not_fall_back_to_environment(monkeypatch, field, value):
+    monkeypatch.setenv(field, str(CONFIG[field]))
+    factory = Mock()
+    monkeypatch.setattr(db_client, "create_engine", factory)
+    with pytest.raises(ValueError) as caught:
+        db_client.DBClient(**dict(CONFIG, **{field: value}))
+    assert "synthetic" not in str(caught.value) and "not-a-port" not in str(caught.value)
+    factory.assert_not_called()
+
+
+def test_config_reads_current_environment_not_import_snapshot(monkeypatch):
+    for key, value in CONFIG.items():
+        monkeypatch.setenv(key, str(value))
+    engine = create_engine("sqlite://")
+    db_client.Base.metadata.create_all(engine)
+    observed = []
+    def factory(url, **kwargs):
+        observed.append(url)
+        assert kwargs["hide_parameters"] is True
+        return engine
+    monkeypatch.setattr(db_client, "create_engine", factory)
+    client = db_client.DBClient()
+    assert observed[0].database == CONFIG["database"] and observed[0].port == 5432
+    client.close()
+    monkeypatch.setenv("database", "synthetic-second")
+    # A fresh in-memory schema is necessary after dispose, independently of config.
+    db_client.Base.metadata.create_all(engine)
+    client = db_client.DBClient()
+    assert observed[1].database == "synthetic-second"
+    client.close()
+
+
+def test_normal_startup_has_only_zero_row_select_and_no_ddl(monkeypatch):
+    engine = create_engine("sqlite://")
+    db_client.Base.metadata.create_all(engine)
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda conn, cursor, statement, parameters, context, many:
+                 statements.append((statement, parameters)))
+    monkeypatch.setattr(db_client, "create_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(db_client.Base.metadata, "create_all", Mock(side_effect=AssertionError("Unexpected DDL")))
+    client = db_client.DBClient(**CONFIG)
+    try:
+        assert len(statements) == 1 and statements[0][0].startswith("SELECT")
+        assert "LIMIT" in statements[0][0] and statements[0][1][0] == 0
+    finally:
+        client.close()
+
+
+def test_missing_schema_is_not_silently_created(monkeypatch):
+    engine = create_engine("sqlite://")
+    disposed = Mock(wraps=engine.dispose)
+    monkeypatch.setattr(engine, "dispose", disposed)
+    monkeypatch.setattr(db_client, "create_engine", lambda *args, **kwargs: engine)
+    with pytest.raises(db_client.DatabaseStartupError):
+        db_client.DBClient(**CONFIG)
+    disposed.assert_called_once()
+    assert inspect(engine).get_table_names() == []
+    engine.dispose()
+
+
+@pytest.mark.parametrize("flag", [1, "true", None])
+def test_schema_creation_requires_boolean(monkeypatch, flag):
+    factory = Mock()
+    monkeypatch.setattr(db_client, "create_engine", factory)
+    with pytest.raises(ValueError, match="boolean"):
+        db_client.DBClient(**CONFIG, create_schema=flag)
+    factory.assert_not_called()
+
+
+def test_schema_cli_requires_explicit_command(monkeypatch, capsys):
+    import dotenv
+    constructor = Mock()
+    monkeypatch.setattr(db_client, "DBClient", constructor)
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda: None)
+    with pytest.raises(SystemExit):
+        db_client.main([])
+    constructor.assert_not_called()
+    db_client.main(["init-schema"])
+    constructor.assert_called_once_with(create_schema=True)
+    constructor.return_value.close.assert_called_once()
+    assert "No catalog rows imported" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("error", [RuntimeError("synthetic connect failure"), asyncio.CancelledError()])

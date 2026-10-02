@@ -36,6 +36,10 @@ constitute a universal hard process deadline. Production supervision must allow
 graceful draining and define a separate hard-stop policy. Forced process kills
 are outside the graceful-cleanup guarantee. Database construction is still a
 synchronous startup step before the broker consumer starts handling traffic.
+It now requires complete explicit configuration and probes required columns with
+zero returned rows, without DDL. Schema initialization is a separate command;
+see `database-startup.md`. Startup probe failures dispose the engine and stop the
+worker before it begins consuming requests.
 
 ## Database Limits
 

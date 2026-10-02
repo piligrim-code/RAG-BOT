@@ -3,6 +3,10 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 import json
 import os
+from pathlib import Path
+import secrets
+import subprocess
+import sys
 import uuid
 from threading import Event
 
@@ -13,13 +17,21 @@ pytestmark = pytest.mark.skipif(os.environ.get("RAG_INTEGRATION") != "1", reason
 
 @pytest.fixture(scope="module")
 def database():
-    from db_client import Catalog, DBClient
+    from db_client import Catalog, DBClient, DatabaseStartupError
 
     name = os.environ["RAG_TEST_DB"]
     if not name.startswith("rag_probe_"):
         raise ValueError("Refusing non-test database")
-    db = DBClient(username="rag_probe", password=os.environ["RAG_TEST_PASSWORD"],
+    config = dict(username="rag_probe", password=os.environ["RAG_TEST_PASSWORD"],
                   host="127.0.0.1", port=int(os.environ["RAG_TEST_PG_PORT"]), database=name)
+    with pytest.raises(DatabaseStartupError):
+        DBClient(**config)
+    env = dict(os.environ, **{key: str(value) for key, value in config.items()})
+    initialized = subprocess.run([sys.executable, "db_client.py", "init-schema"], env=env,
+        cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30)
+    assert initialized.returncode == 0, "Owned schema initialization failed"
+    assert "No catalog rows imported" in initialized.stdout
+    db = DBClient(**config)
     try:
         # Refuse an existing catalog rather than clearing unknown records.
         if db.extract_catalog():
@@ -348,6 +360,50 @@ def test_database_statement_deadline_and_next_session_recovery(database):
         assert client.engine.pool.checkedout() == 0
     finally:
         client.close()
+
+
+def test_read_only_role_can_start_and_read_catalog_without_ddl(database, monkeypatch):
+    import db_client
+    from sqlalchemy import event, text
+
+    role = "rag_read_" + uuid.uuid4().hex[:12]
+    password = secrets.token_urlsafe(24)
+    identifier = database.engine.dialect.identifier_preparer.quote(role)
+    created = False
+    client = None
+    statements = []
+    original_engine = db_client.create_engine
+    def capture_engine(*args, **kwargs):
+        engine = original_engine(*args, **kwargs)
+        event.listen(engine, "before_cursor_execute", lambda conn, cursor, statement, parameters, context, many:
+                     statements.append(statement))
+        return engine
+    monkeypatch.setattr(db_client, "create_engine", capture_engine)
+    try:
+        with database.engine.begin() as connection:
+            connection.execute(text(f"CREATE ROLE {identifier} LOGIN PASSWORD :password"), {"password": password})
+            connection.execute(text(f"GRANT USAGE ON SCHEMA public TO {identifier}"))
+            connection.execute(text(f"GRANT SELECT ON TABLE products_trio TO {identifier}"))
+            connection.execute(text(f"ALTER ROLE {identifier} SET default_transaction_read_only=on"))
+        created = True
+        client = db_client.DBClient(username=role, password=password, host="127.0.0.1",
+            port=int(os.environ["RAG_TEST_PG_PORT"]), database=os.environ["RAG_TEST_DB"])
+        probes = [statement for statement in statements if "products_trio" in statement]
+        assert len(probes) == 1 and probes[0].startswith("SELECT") and "LIMIT" in probes[0]
+        assert all(statement.lstrip().split(None, 1)[0].upper() in {"SELECT", "SHOW", "SET"}
+                   for statement in statements)
+        with client.Session() as session:
+            assert session.execute(text("SHOW transaction_read_only")).scalar() == "on"
+        assert len(client.extract_catalog()) == 2
+        assert client.engine.pool.checkedout() == 0
+    finally:
+        if client is not None:
+            client.close()
+        if created:
+            with database.engine.begin() as connection:
+                connection.execute(text(f"REVOKE SELECT ON TABLE products_trio FROM {identifier}"))
+                connection.execute(text(f"REVOKE USAGE ON SCHEMA public FROM {identifier}"))
+                connection.execute(text(f"DROP ROLE {identifier}"))
 
 
 def test_table_lock_timeout_keeps_event_loop_responsive(database):
