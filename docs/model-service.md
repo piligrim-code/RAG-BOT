@@ -90,10 +90,13 @@ codes rather than raw prompts, filesystem paths or native exception text.
 
 Only one native operation is admitted at a time; additional calls receive 503
 `busy` without queueing. Startup handshake defaults to 120 seconds and an operation
-to 30 seconds. A timeout or caller cancellation retires the owned process, closes
+to 30 seconds. A timeout or async caller cancellation retires the owned process, closes
 its pipe and drains the IPC thread; no request is replayed. Subsequent requests get
 503 `unavailable`, and health becomes 503 until the service is explicitly restarted.
 A completed backend exception is a 502 and does not automatically replay the call.
+An HTTP client disconnect does not necessarily cancel its server-side task; that
+operation can continue until its ordinary deadline. This is distinct from explicit
+task cancellation and is not claimed as an immediate disconnect abort.
 
 Graceful idle shutdown asks the backend to close its model and Chroma client.
 An active/stalled process is terminated; kill is the final fallback. Join waits

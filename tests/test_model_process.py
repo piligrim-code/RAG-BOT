@@ -124,3 +124,31 @@ def test_repeated_cancellation_cannot_interrupt_process_cleanup(monkeypatch):
         assert pid not in {process.pid for process in multiprocessing.active_children()}
         assert not runtime.ready
     asyncio.run(scenario())
+
+
+def test_close_during_startup_cannot_restore_readiness(monkeypatch):
+    async def scenario():
+        runtime = ModelProcess(SyntheticBackend, startup_timeout=15)
+        entered, release = Event(), Event()
+        original = runtime._roundtrip
+        def held_ready(payload):
+            response = original(payload)
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("Synthetic handshake was not released")
+            return response
+        monkeypatch.setattr(runtime, "_roundtrip", held_ready)
+        starting = asyncio.create_task(runtime.start())
+        try:
+            async with asyncio.timeout(10):
+                while not entered.is_set():
+                    await asyncio.sleep(0.01)
+            closing = asyncio.create_task(runtime.close())
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        with pytest.raises(ModelProcessError, match="unavailable"):
+            await starting
+        await closing
+        assert not runtime.ready
+    asyncio.run(scenario())

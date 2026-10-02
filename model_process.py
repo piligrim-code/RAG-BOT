@@ -82,6 +82,8 @@ class ModelProcess:
             response = await self._exchange(None, self.startup_timeout)
             if response != {"ready": True}:
                 raise ModelProcessError("startup_failure")
+            if self._closing is not None:
+                raise ModelProcessError("unavailable")
             self.ready = True
         except BaseException:
             child.close()
