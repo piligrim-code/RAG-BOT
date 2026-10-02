@@ -5,6 +5,7 @@ import os
 
 from aio_pika import Message, connect_robust
 from catalog_service import dispatch_catalog_request
+from catalog_filters import load_json_object
 
 
 async def serve_catalog(database, url, request_queue="catalog_store", ready=None):
@@ -22,7 +23,7 @@ async def serve_catalog(database, url, request_queue="catalog_store", ready=None
                     if not message.reply_to or not message.correlation_id:
                         continue
                     try:
-                        request = json.loads(message.body.decode("utf-8"))
+                        request = load_json_object(message.body)
                         response = dispatch_catalog_request(request, database)
                     except ValueError:
                         response = {"error": {"code": "invalid_request"}}

@@ -1,10 +1,10 @@
 from collections.abc import Mapping
+from catalog_filters import normalize_filters
 
 async def extract_gk(slots, rpc_client):
     if not isinstance(slots, Mapping):
         raise ValueError("Catalog filters must be an object")
-    used_params = {param_name: param_value for param_name, param_value in slots.items()
-                   if param_value != "не имеет значения"}
+    used_params = normalize_filters(slots)
     catalogs = await rpc_client.call({"extract_catalog": used_params})
     if not isinstance(catalogs, list) or not all(isinstance(item, dict) for item in catalogs):
         raise ValueError("Catalog response must be a list of objects")

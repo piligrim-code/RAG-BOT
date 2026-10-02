@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, func, Column, Integer, Float, String, Date
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
+from catalog_filters import normalize_filters, CATALOG_LIMIT
 
 
 username = os.getenv("username")
@@ -49,7 +50,10 @@ class DBClient:
         finally:
             self.engine.dispose()
 
-    def extract_catalog(self, parameters=None):
+    def extract_catalog(self, parameters=None, *, limit=CATALOG_LIMIT):
+        parameters = normalize_filters({} if parameters is None else parameters)
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 1000):
+            raise ValueError("limit must be an integer from 1 to 1000, or None for an explicit export")
         # Each RPC owns its transaction; a failed query cannot poison the next.
         with self.Session() as session:
             f_catalog = session.query(Catalog)
@@ -67,12 +71,18 @@ class DBClient:
                                 f_catalog = f_catalog.filter(Catalog.price < value)
                             elif sign == ">":
                                 f_catalog = f_catalog.filter(Catalog.price > value)
+                            elif sign == "<=":
+                                f_catalog = f_catalog.filter(Catalog.price <= value)
+                            elif sign == ">=":
+                                f_catalog = f_catalog.filter(Catalog.price >= value)
+                            elif sign == "=":
+                                f_catalog = f_catalog.filter(Catalog.price == value)
             return [{
                 "Артикул": item.art,
                 "Категория": item.cat,
                 "Описание": item.descr,
                 "Цена": item.price,
-            } for item in f_catalog.all()]
+            } for item in f_catalog.order_by(Catalog.art).limit(limit).all()]
 
     def new_dialog(self, user_id):
         dialog = Dialog(user_id=user_id)

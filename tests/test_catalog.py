@@ -10,6 +10,7 @@ import pytest
 
 from catalog_service import CatalogRequestError, catalog_reply, dispatch_catalog_request
 from db_calls import extract_gk
+from catalog_filters import SKU
 
 
 def test_empty_catalog_is_a_result_not_an_exception():
@@ -38,7 +39,7 @@ def test_request_matches_worker_contract():
     database = SimpleNamespace(extract_catalog=Mock(return_value=[{"sku": "synthetic"}]))
     result = dispatch_catalog_request({"extract_catalog": {"sku": "synthetic"}}, database)
     assert result == [{"sku": "synthetic"}]
-    database.extract_catalog.assert_called_once_with({"sku": "synthetic"})
+    database.extract_catalog.assert_called_once_with({SKU: "synthetic"})
 
 
 @pytest.mark.parametrize("payload", [{}, {"extract_bikes": {}}, {"extract_catalog": []},
@@ -53,6 +54,12 @@ def test_worker_rejects_unsupported_contract(payload):
 def test_message_length_is_bounded():
     rpc = SimpleNamespace(call=AsyncMock(return_value=[{"text": "x" * 10000}]))
     assert len(asyncio.run(catalog_reply({}, rpc))) < 4096
+
+
+def test_non_bmp_reply_is_bounded_in_utf16_units():
+    rpc = SimpleNamespace(call=AsyncMock(return_value=[{"text": "\U0001f600" * 10000}]))
+    reply = asyncio.run(catalog_reply({}, rpc))
+    assert len(reply.encode("utf-16-le")) <= 7000
 
 
 def test_offline_demo_outputs_both_cases():
