@@ -65,10 +65,10 @@ continues. Worker reply publication is explicitly non-mandatory, so a vanished
 reply queue does not require successful routing before serving later requests.
 The reply is disposable and is not retained/retried for another client.
 
-This does not make request/reply messages durable, provide exactly-once results
-or qualify broker-restart recovery. Broker connection failures and restarts
-remain a separate integration stage. Correlation IDs and client deadlines
-continue to determine which pending call can consume a reply.
+This does not make request/reply messages durable or provide exactly-once
+results. Correlation IDs and client deadlines continue to determine which
+pending call can consume a reply. The owned application-restart scenarios and
+their limits are described in `broker-recovery.md`.
 
 ## Verification
 
