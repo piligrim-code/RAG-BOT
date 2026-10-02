@@ -14,7 +14,12 @@ def database(monkeypatch):
     engine = create_engine("sqlite://")
     def engine_factory(url, **kwargs):
         assert url.drivername == "postgresql+psycopg2"
-        assert kwargs["connect_args"]["connect_timeout"] == 10
+        assert kwargs["connect_args"]["connect_timeout"] == 5
+        assert kwargs["connect_args"]["options"] == (
+            "-c statement_timeout=5000 -c lock_timeout=2000 "
+            "-c idle_in_transaction_session_timeout=10000")
+        assert kwargs["pool_pre_ping"] is True and kwargs["pool_timeout"] == 2
+        assert kwargs["pool_size"] == 2 and kwargs["max_overflow"] == 0
         return engine
     monkeypatch.setattr(db_client, "create_engine", engine_factory)
     client = db_client.DBClient()
@@ -95,6 +100,19 @@ def test_failed_schema_initialization_disposes_engine(monkeypatch):
     with pytest.raises(RuntimeError):
         db_client.DBClient()
     engine.dispose.assert_called_once_with()
+
+
+@pytest.mark.parametrize("options", [
+    {"statement_timeout_ms": 0}, {"statement_timeout_ms": True},
+    {"statement_timeout_ms": 60001}, {"lock_timeout_ms": -1},
+    {"lock_timeout_ms": 1.5}, {"lock_timeout_ms": 6000},
+])
+def test_invalid_deadlines_do_not_create_engine(monkeypatch, options):
+    factory = Mock()
+    monkeypatch.setattr(db_client, "create_engine", factory)
+    with pytest.raises(ValueError):
+        db_client.DBClient(**options)
+    factory.assert_not_called()
 
 
 def test_close_disposes_even_if_session_close_fails():

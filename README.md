@@ -54,7 +54,8 @@ updates, real AMQP and real SQL; duplicate/oversize wire requests and unknown
 filters are rejected, and an actual SQL error is followed by a successful request.
 Database sessions are scoped per request; worker shutdown closes its database.
 The PostgreSQL adapter selects the declared psycopg2 driver explicitly and
-bounds each connection attempt to ten seconds.
+bounds each connection attempt to five seconds. Its pool has two connections,
+no overflow, a two-second checkout timeout and connection-health checks.
 
 The runner removes only its labeled containers and their anonymous volumes,
 including on ordinary test failures. Public dependency images stay cached.
@@ -64,8 +65,9 @@ that could not be removed. Docker access is privileged: use a trusted local
 engine or disposable CI runner. CI has a separate Linux integration job.
 
 This is not Telegram, LLM, vector-search, TLS, broker-restart failover or
-production-load qualification. The database adapter still uses synchronous
-SQL inside the worker and only the catalog path is supported. Test output
+production-load qualification. Catalog SQL is offloaded to one owned execution
+thread, with statement/lock deadlines and graceful draining on shutdown.
+Only the catalog path is supported. Test output
 records dependency image IDs; tags and Python requirement ranges are not a
 fully locked production environment.
 
@@ -97,6 +99,16 @@ The application never deletes an existing queue or enables deprecated broker
 features automatically. Test only in a disposable environment first. Durable
 queue metadata does not make these transient RPC messages persistent, and the
 client does not promise retries or exactly-once processing.
+
+## Worker Lifecycle
+
+`CatalogExecutor` owns one SQL execution thread and admits one request at a
+time. Cancelling an async task does not kill a running database call: shutdown
+drains that call before disposing the database. PostgreSQL applies a five-second
+statement deadline, two-second lock deadline and ten-second idle-transaction
+deadline by default. Late replies to removed callback queues are disposable;
+they must not stop service for subsequent requests. See
+`docs/worker-lifecycle.md` for precise cancellation and recovery boundaries.
 
 ## Optional Live Setup
 

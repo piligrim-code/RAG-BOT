@@ -4,14 +4,14 @@ import logging
 import os
 
 from aio_pika import Message, connect_robust
-from catalog_service import dispatch_catalog_request
 from catalog_filters import load_json_object
+from catalog_worker import CatalogExecutor
 
 
 async def serve_catalog(database, url, request_queue="catalog_store", ready=None):
     """Serve the catalog contract; the caller owns the database lifecycle."""
     connection = await connect_robust(url, timeout=15)
-    async with connection:
+    async with connection, CatalogExecutor(database) as executor:
         channel = await connection.channel()
         await channel.set_qos(prefetch_count=1)
         queue = await channel.declare_queue(request_queue, durable=True)
@@ -24,7 +24,7 @@ async def serve_catalog(database, url, request_queue="catalog_store", ready=None
                         continue
                     try:
                         request = load_json_object(message.body)
-                        response = dispatch_catalog_request(request, database)
+                        response = await executor.dispatch(request)
                     except ValueError:
                         response = {"error": {"code": "invalid_request"}}
                     except Exception as error:
@@ -34,6 +34,7 @@ async def serve_catalog(database, url, request_queue="catalog_store", ready=None
                         Message(json.dumps(response).encode("utf-8"),
                                 content_type="application/json", correlation_id=message.correlation_id),
                         routing_key=message.reply_to,
+                        mandatory=False,
                     )
 
 

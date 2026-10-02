@@ -26,7 +26,12 @@ class Catalog(Base):
 
 class DBClient:
     def __init__(self, username=username, password=password, host=host, port=port,
-                       database=database):
+                       database=database, *, statement_timeout_ms=5000, lock_timeout_ms=2000):
+        for value in (statement_timeout_ms, lock_timeout_ms):
+            if type(value) is not int or not 1 <= value <= 60000:
+                raise ValueError("Database deadlines must be integers between 1 and 60000 ms")
+        if lock_timeout_ms > statement_timeout_ms:
+            raise ValueError("Lock deadline must not exceed the statement deadline")
         url = URL.create(
             drivername="postgresql+psycopg2",
             username=username,
@@ -35,7 +40,12 @@ class DBClient:
             port=port,
             database=database
         )
-        self.engine = create_engine(url, connect_args={"connect_timeout": 10})
+        self.engine = create_engine(
+            url, pool_pre_ping=True, pool_size=2, max_overflow=0, pool_timeout=2,
+            connect_args={"connect_timeout": 5, "options":
+                f"-c statement_timeout={statement_timeout_ms} "
+                f"-c lock_timeout={lock_timeout_ms} "
+                "-c idle_in_transaction_session_timeout=10000"})
         try:
             Base.metadata.create_all(self.engine)
             self.Session = sessionmaker(bind=self.engine)

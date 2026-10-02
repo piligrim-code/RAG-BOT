@@ -66,7 +66,8 @@ protection and exactly-once notification guarantees are not implemented here.
   disabled. Environment proxies are ignored and compressed replies are rejected.
 - The dialogue has a 45-second asynchronous deadline covering extraction and
   lookup. Caller cancellation propagates. These are not process-level limits
-  for blocking code; synchronous SQL in the broker worker remains separate work.
+  for blocking code. The broker worker offloads SQL to an owned thread and drains
+  it before shutdown; database deadlines are documented in `worker-lifecycle.md`.
 - Worker JSON requests above 16 KiB and duplicate keys are rejected before
   dispatch. The AMQP library has already received the body at that point; this
   is not a broker-wide message-memory limit.
@@ -92,6 +93,6 @@ and PostgreSQL, including follow-up constraints and recovery after SQL errors.
 
 All model replies are predetermined fixtures. No weights, customer records,
 provider credentials or Telegram delivery are involved. Real relevance/quality,
-the legacy vector server, bot polling/lifecycle, broker restarts, SQL deadlines,
+the legacy vector server, bot polling/lifecycle, broker restarts,
 concurrency, migrations, authentication and operational deployment remain
 separate qualification tasks. No existing database or queue was migrated here.

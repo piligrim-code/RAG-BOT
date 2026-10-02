@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager, suppress
 import json
 import os
 import uuid
+from threading import Event
 
 import pytest
 
@@ -280,4 +281,86 @@ def test_next_call_reconnects_after_connection_is_closed(database):
             await client.connection.close()
             assert len(await client.call({"extract_catalog": {}})) == 2
             assert client.callback_queue.name != previous_queue
+    asyncio.run(scenario())
+
+
+def test_database_statement_deadline_and_next_session_recovery(database):
+    from db_client import DBClient
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+
+    client = DBClient(username="rag_probe", password=os.environ["RAG_TEST_PASSWORD"],
+                      host="127.0.0.1", port=int(os.environ["RAG_TEST_PG_PORT"]),
+                      database=os.environ["RAG_TEST_DB"],
+                      statement_timeout_ms=1000, lock_timeout_ms=250)
+    try:
+        with client.Session() as session:
+            assert session.execute(text("SHOW statement_timeout")).scalar() == "1s"
+            assert session.execute(text("SHOW lock_timeout")).scalar() == "250ms"
+            with pytest.raises(DBAPIError) as caught:
+                session.execute(text("SELECT pg_sleep(3)"))
+            assert caught.value.orig.pgcode == "57014"
+        assert len(client.extract_catalog()) == 2
+        assert client.engine.pool.checkedout() == 0
+    finally:
+        client.close()
+
+
+def test_table_lock_timeout_keeps_event_loop_responsive(database):
+    from rabbitclient import RpcRemoteError
+    from sqlalchemy import text
+
+    async def scenario():
+        async with stack(database, timeout=10) as client:
+            ticks = []
+            stop = asyncio.Event()
+            async def heartbeat():
+                while not stop.is_set():
+                    await asyncio.sleep(0.02)
+                    ticks.append(True)
+            pulse = asyncio.create_task(heartbeat())
+            try:
+                with database.engine.connect() as locked:
+                    transaction = locked.begin()
+                    try:
+                        locked.execute(text("LOCK TABLE products_trio IN ACCESS EXCLUSIVE MODE"))
+                        with pytest.raises(RpcRemoteError, match="rejected"):
+                            await client.call({"extract_catalog": {}})
+                        assert len(ticks) >= 3
+                    finally:
+                        transaction.rollback()
+                assert len(await client.call({"extract_catalog": {}})) == 2
+            finally:
+                stop.set()
+                await pulse
+    asyncio.run(scenario())
+
+
+def test_late_reply_to_closed_callback_queue_does_not_kill_worker(database, monkeypatch):
+    original = database.extract_catalog
+    entered, release = Event(), Event()
+    first = True
+    def slow_once(filters):
+        nonlocal first
+        if first:
+            first = False
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("Synthetic read was not released")
+        return original(filters)
+    monkeypatch.setattr(database, "extract_catalog", slow_once)
+    async def scenario():
+        async with stack(database) as client:
+            task = asyncio.create_task(client.call({"extract_catalog": {}}))
+            try:
+                async with asyncio.timeout(2):
+                    while not entered.is_set():
+                        await asyncio.sleep(0.005)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                await client.close()
+            finally:
+                release.set()
+            assert len(await client.call({"extract_catalog": {}})) == 2
     asyncio.run(scenario())
