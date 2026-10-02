@@ -35,7 +35,7 @@ def database():
 
 
 @asynccontextmanager
-async def stack(database, timeout=5):
+async def stack(database, timeout=5, monitor=None):
     from rabbitclient import RpcClient
     from rabbitmq import serve_catalog
 
@@ -51,6 +51,8 @@ async def stack(database, timeout=5):
             raise RuntimeError("Worker exited before readiness")
         if startup not in done:
             raise TimeoutError("Worker did not become ready")
+        if monitor is not None:
+            monitor["worker"] = worker
         yield client
     finally:
         startup.cancel()
@@ -363,4 +365,82 @@ def test_late_reply_to_closed_callback_queue_does_not_kill_worker(database, monk
             finally:
                 release.set()
             assert len(await client.call({"extract_catalog": {}})) == 2
+    asyncio.run(scenario())
+
+
+async def wait_for_restored_consumer(client, worker):
+    from aio_pika import connect
+
+    async with asyncio.timeout(45):
+        connection = await connect(client.url, timeout=10)
+        async with connection:
+            channel = await connection.channel()
+            while True:
+                if worker.done():
+                    await worker
+                    pytest.fail("Catalog worker exited during broker recovery")
+                queue = await channel.declare_queue(client.request_queue, passive=True)
+                if queue.declaration_result.consumer_count:
+                    return
+                await asyncio.sleep(0.2)
+
+
+@pytest.mark.parametrize("inflight", [False, True])
+def test_owned_broker_application_restart_recovers_new_calls(database, monkeypatch, inflight):
+    from aio_pika.exceptions import AMQPError
+    from rabbitclient import RpcRemoteError
+    from tools.broker_probe import OwnedBroker
+
+    broker = OwnedBroker()
+    original = database.extract_catalog
+    entered, release = Event(), Event()
+    hold_next = False
+    def hold_one_read(filters):
+        nonlocal hold_next
+        if hold_next:
+            hold_next = False
+            entered.set()
+            if not release.wait(60):
+                raise RuntimeError("Synthetic in-flight read was not released")
+        return original(filters)
+    monkeypatch.setattr(database, "extract_catalog", hold_one_read)
+    async def scenario():
+        nonlocal hold_next
+        monitor = {}
+        stopped = False
+        pending = None
+        async with stack(database, timeout=2, monitor=monitor) as client:
+            try:
+                assert len(await client.call({"extract_catalog": {}})) == 2
+                old_queue = client.callback_queue.name
+                if inflight:
+                    hold_next = True
+                    pending = asyncio.create_task(client.call({"extract_catalog": {}}))
+                    async with asyncio.timeout(5):
+                        while not entered.is_set():
+                            await asyncio.sleep(0.005)
+                stopped = True
+                await asyncio.to_thread(broker.stop)
+                release.set()
+                if pending is not None:
+                    with pytest.raises((TimeoutError, AMQPError, ConnectionError, RpcRemoteError)):
+                        await pending
+                    assert not client.futures
+                # Mark before invocation: an uncertain start result is not retried.
+                stopped = False
+                await asyncio.to_thread(broker.start)
+                await asyncio.to_thread(broker.wait_ready)
+                await wait_for_restored_consumer(client, monitor["worker"])
+                client.timeout = 10
+                assert len(await client.call({"extract_catalog": {}})) == 2
+                assert client.callback_queue.name != old_queue
+                assert not client.futures and not monitor["worker"].done()
+            finally:
+                release.set()
+                if pending is not None and not pending.done():
+                    pending.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await pending
+                if stopped:
+                    await asyncio.to_thread(broker.start)
     asyncio.run(scenario())

@@ -17,9 +17,12 @@ def wire(monkeypatch, client, body=b'[]'):
         assert message.content_type == "application/json"
         if body is not None:
             await client.on_response(SimpleNamespace(correlation_id=message.correlation_id, body=body))
-    channel = SimpleNamespace(declare_queue=AsyncMock(return_value=queue),
+    channel = SimpleNamespace(is_closed=False, declare_queue=AsyncMock(return_value=queue),
                               default_exchange=SimpleNamespace(publish=AsyncMock(side_effect=publish)))
-    connection = SimpleNamespace(is_closed=False, channel=AsyncMock(return_value=channel), close=AsyncMock())
+    connected = asyncio.Event()
+    connected.set()
+    connection = SimpleNamespace(is_closed=False, connected=connected, close_callbacks=set(),
+                                 channel=AsyncMock(return_value=channel), close=AsyncMock())
     connect = AsyncMock(return_value=connection)
     monkeypatch.setattr(rabbitclient, "connect", connect)
     return connection, channel, queue, connect
@@ -163,3 +166,55 @@ def test_close_cancels_pending_calls(monkeypatch):
         assert not client.futures
         connection.close.assert_awaited_once()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("broken", ["channel", "transport"])
+def test_next_call_replaces_broken_channel_even_if_connection_not_marked_closed(monkeypatch, broken):
+    async def scenario():
+        client = RpcClient(url="amqp://localhost/synthetic")
+        first, channel, _, _ = wire(monkeypatch, client)
+        assert await client.call({}) == []
+        if broken == "channel":
+            channel.is_closed = True
+        else:
+            first.connected.clear()
+        second, _, _, connect = wire(monkeypatch, client)
+        assert await client.call({}) == []
+        assert client.connection is second
+        first.close.assert_awaited_once()
+        connect.assert_awaited_once()
+        await client.close()
+    asyncio.run(scenario())
+
+
+def test_disconnect_fails_pending_without_republishing(monkeypatch):
+    async def scenario():
+        client = RpcClient(url="amqp://localhost/synthetic")
+        connection, channel, _, _ = wire(monkeypatch, client, body=None)
+        task = asyncio.create_task(client.call({}))
+        await asyncio.sleep(0)
+        connection.connected.clear()
+        await client._on_disconnect(connection)
+        with pytest.raises(RpcRemoteError, match="not retried"):
+            await task
+        assert not client.futures
+        channel.default_exchange.publish.assert_awaited_once()
+        await client.close()
+    asyncio.run(scenario())
+
+
+def test_old_connection_callback_cannot_fail_new_pending_request(monkeypatch):
+    async def scenario():
+        client = RpcClient(url="amqp://localhost/synthetic")
+        old, channel, _, _ = wire(monkeypatch, client)
+        assert await client.call({}) == []
+        channel.is_closed = True
+        new, _, _, _ = wire(monkeypatch, client, body=None)
+        task = asyncio.create_task(client.call({}))
+        await asyncio.sleep(0)
+        await client._on_disconnect(old)
+        assert not task.done() and client.connection is new
+        await client.close()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(scenario())

@@ -1,15 +1,29 @@
 """Run synthetic catalog checks in two owned, loopback-only Docker containers."""
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import subprocess
 import sys
 import time
 import uuid
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGES = {"postgres": "postgres:16-alpine", "rabbitmq": "rabbitmq:4-alpine"}
+
+
+def validate_local_endpoint(endpoint):
+    if not isinstance(endpoint, str) or "\x00" in endpoint:
+        raise ValueError("Invalid Docker endpoint")
+    parsed = urlsplit(endpoint)
+    unix = (parsed.scheme == "unix" and not parsed.netloc and parsed.path.startswith("/")
+            and not parsed.path.startswith("//"))
+    pipe = re.fullmatch(r"npipe:(?://|////)\./pipe/[A-Za-z0-9_.-]+", endpoint)
+    if (not (unix or pipe) or parsed.query or parsed.fragment
+            or any(character.isspace() for character in endpoint)):
+        raise ValueError("Only local Unix sockets or local named pipes are allowed")
 
 
 def run():
@@ -34,8 +48,9 @@ def run():
     try:
         context = json.loads(docker("context", "inspect").stdout)[0]
         endpoint = context["Endpoints"]["docker"]["Host"]
-        if env.get("DOCKER_HOST") or not endpoint.startswith(("npipe://", "unix://")):
+        if env.get("DOCKER_HOST"):
             raise RuntimeError("Use an explicit local Docker context with DOCKER_HOST unset")
+        validate_local_endpoint(endpoint)
         # These are public dependency images, not pre-existing application containers.
         for service, image in IMAGES.items():
             stage = "prepare " + service
@@ -89,11 +104,12 @@ def run():
             image_ids[service] = obj["Image"]
         env.update(RAG_INTEGRATION="1", RAG_TEST_DB=env["POSTGRES_DB"],
                    RAG_TEST_PASSWORD=password, RAG_TEST_PG_PORT=ports["postgres"],
+                   RAG_TEST_OWNER=project, RAG_TEST_BROKER_CONTAINER=project + "-rabbitmq",
                    RAG_TEST_AMQP_URL="amqp://rag_probe:" + password + "@127.0.0.1:" + ports["rabbitmq"] + "/")
         print(json.dumps({"images": image_ids, "scope": "synthetic SQL + AMQP, no model or Telegram"}), flush=True)
         stage = "integration tests"
         result = subprocess.run([sys.executable, "-m", "pytest", "tests/integration", "-q", "--tb=short"],
-                                cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+                                cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
         print((result.stdout + result.stderr).replace(password, "<redacted>"))
         return result.returncode
     except (subprocess.SubprocessError, OSError, ValueError, KeyError, RuntimeError) as error:

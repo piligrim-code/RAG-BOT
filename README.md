@@ -49,6 +49,8 @@ credentials and randomly allocated loopback-only ports. It inserts two
 synthetic products and tests actual SQL/AMQP request/reply, filters, empty
 results, concurrent clients, malformed requests, SQL failure recovery,
 timeouts, cancellation and a new call after a closed client connection.
+Two recovery scenarios stop/start the owned RabbitMQ application, while idle
+and while a SQL read is in flight, then verify a new request can succeed.
 It also exercises a synthetic model HTTP endpoint through multi-turn filter
 updates, real AMQP and real SQL; duplicate/oversize wire requests and unknown
 filters are rejected, and an actual SQL error is followed by a successful request.
@@ -64,7 +66,7 @@ kill or Docker outage can prevent cleanup; the runner reports any owned names
 that could not be removed. Docker access is privileged: use a trusted local
 engine or disposable CI runner. CI has a separate Linux integration job.
 
-This is not Telegram, LLM, vector-search, TLS, broker-restart failover or
+This is not Telegram, LLM, vector-search, TLS, cluster failover or
 production-load qualification. Catalog SQL is offloaded to one owned execution
 thread, with statement/lock deadlines and graceful draining on shutdown.
 Only the catalog path is supported. Test output
@@ -110,6 +112,12 @@ deadline by default. Late replies to removed callback queues are disposable;
 they must not stop service for subsequent requests. See
 `docs/worker-lifecycle.md` for precise cancellation and recovery boundaries.
 
+The worker restores its consumer after a broker connection loss. The RPC client
+fails interrupted pending calls and opens a new callback queue on its next call.
+It does not replay the interrupted request. An unanswered read may already have
+executed, and RabbitMQ may redeliver an unacknowledged request. See
+`docs/broker-recovery.md` for the tested scenario and operational limits.
+
 ## Optional Live Setup
 
 `requirements.txt` lists dependencies for the catalog worker and Telegram
@@ -150,7 +158,7 @@ python main.py
 
 Do not use real customer data as the first integration test. Database schema
 migrations, real model interpretation quality, authentication,
-reconnection under broker restarts, vector retrieval, production concurrency
+cluster failover, vector retrieval, production concurrency
 and data-retention policies still need a separate review. The stored legacy
 dialog helper methods reference models not supplied by this snapshot and are
 not part of the corrected catalog contract.

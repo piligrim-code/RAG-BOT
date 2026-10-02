@@ -25,10 +25,28 @@ class RpcClient:
         self.callback_queue = None
         self._connect_lock = asyncio.Lock()
 
+    def _fail_pending(self):
+        for future in self.futures.values():
+            if not future.done():
+                future.set_exception(RpcRemoteError("RPC connection lost; request was not retried"))
+        self.futures.clear()
+
+    async def _on_disconnect(self, connection, error=None):
+        # Delayed callbacks from an old connection cannot fail newer calls.
+        if connection is self.connection:
+            self._fail_pending()
+
     async def connect(self):
         async with self._connect_lock:
-            if self.connection is not None and not self.connection.is_closed:
+            if (self.connection is not None and not self.connection.is_closed
+                    and self.connection.connected.is_set()
+                    and self.channel is not None and not self.channel.is_closed):
                 return self
+            previous, self.connection = self.connection, None
+            self.channel = self.callback_queue = None
+            self._fail_pending()
+            if previous is not None:
+                await previous.close()
             url = self.url or os.environ.get("RABBITMQ_URL")
             if not url:
                 raise ValueError("Set RABBITMQ_URL before using live RPC")
@@ -41,6 +59,7 @@ class RpcClient:
                 await connection.close()
                 raise
             self.connection, self.channel, self.callback_queue = connection, channel, queue
+            connection.close_callbacks.add(self._on_disconnect)
         return self
 
     async def on_response(self, message):
@@ -79,6 +98,8 @@ class RpcClient:
             self.futures.pop(correlation_id, None)
             if future is not None and not future.done():
                 future.cancel()
+            elif future is not None and not future.cancelled():
+                future.exception()
 
     async def close(self):
         async with self._connect_lock:
