@@ -1,8 +1,9 @@
 # RAG-BOT
 
 A historical Telegram sales-assistant prototype. The tested public slice is
-validated catalog dialogue, model-service HTTP parsing and RabbitMQ/SQL lookup,
-not a complete RAG product. The old diagram and model/vector experiments are
+validated catalog dialogue, model-service HTTP parsing, RabbitMQ/SQL lookup and
+an import-safe Telegram adapter tested with an in-memory transport, not a complete
+RAG product. The old diagram and model/vector experiments are
 historical context; real model quality and Telegram delivery remain unqualified.
 
 ## Offline Demo
@@ -32,7 +33,9 @@ Tests cover empty/malformed responses, the `extract_catalog` contract,
 callback queues, connection reuse, deadlines, cancellation and pending-call
 cleanup, strict filter normalization and nonmutating follow-up state. The default
 suite mocks broker calls, uses in-memory SQLite for SQL/resource tests and creates
-temporary loopback HTTP servers with synthetic model replies. No public model
+temporary loopback HTTP servers with synthetic model replies. Bot tests execute
+the real aiogram dispatcher/polling lifecycle with a strict in-memory Telegram
+transport, including same-session ordering, bounded state and shutdown. No public model
 service or Telegram account is used. Live SQL/AMQP tests are skipped unless explicitly
 enabled. CI runs the default suite on Python 3.12, Linux and Windows.
 
@@ -54,6 +57,8 @@ and while a SQL read is in flight, then verify a new request can succeed.
 It also exercises a synthetic model HTTP endpoint through multi-turn filter
 updates, real AMQP and real SQL; duplicate/oversize wire requests and unknown
 filters are rejected, and an actual SQL error is followed by a successful request.
+One workflow includes aiogram dispatch and a synthetic Telegram reply transport
+through the HTTP, broker and database path, followed by `/forget` and cleanup.
 Database sessions are scoped per request; worker shutdown closes its database.
 The PostgreSQL adapter selects the declared psycopg2 driver explicitly and
 bounds each connection attempt to five seconds. Its pool has two connections,
@@ -91,8 +96,8 @@ fully locked production environment.
   Failed/cancelled calls release their correlation entries. Calls are not retried.
 - Empty results produce a normal no-products response; matching context is
   limited to three products and user-facing text is capped at 3,500 UTF-16 units.
-- The current Telegram path uses an in-memory dialog ID, not the unimplemented
-  legacy `new_dialog`/`add_message` database API.
+- The Telegram adapter retains only temporary filters and operator-routing state,
+  not conversation transcripts or the unimplemented legacy dialog database API.
 
 An existing non-durable `catalog_store` cannot be redeclared as durable. For
 that legacy deployment, stop producers, drain/inspect pending work, stop the
@@ -128,7 +133,7 @@ Configure these privately in the process environment or an untracked `.env`:
 | Component | Configuration |
 | --- | --- |
 | RabbitMQ client/worker | `RABBITMQ_URL` (required, no embedded default password) |
-| Telegram adapter | `BOT_TOKEN`, `ADMIN_ID` |
+| Telegram adapter | `BOT_TOKEN`; optional `ADMIN_ID` for explicitly requested operator forwarding |
 | PostgreSQL legacy adapter | `username`, `password`, `host`, `port`, `database` |
 | Model slot extractor | `LLM_URL` |
 
@@ -144,8 +149,10 @@ Raw responses and filter values are not logged by the extractor.
 filters and returns new state only after a successful lookup or clarification.
 Malformed model output cannot fall back to an unfiltered query. The Telegram
 handler saves the returned state after its reply call succeeds. This does not
-provide atomic Telegram delivery or serialization of simultaneous same-chat
-turns. See `docs/catalog-dialogue.md` for supported fields and recovery limits.
+provide atomic Telegram delivery. Same-session turns are serialized in one
+process; `/forget` clears state even if its confirmation cannot be delivered.
+See `docs/catalog-dialogue.md` and `docs/bot-lifecycle.md` for supported fields,
+commands, retention and recovery limits.
 
 With separately provisioned services and reviewed synthetic data:
 
