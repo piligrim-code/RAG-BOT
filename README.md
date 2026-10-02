@@ -64,6 +64,8 @@ fully locked production environment.
 ## Corrected Catalog Contract
 
 - Request: `{"extract_catalog": {}}`, response: a JSON array of product objects.
+- Recognized filters are combined with AND, including SKU. The order of JSON
+  keys must not change the result; SKU does not bypass category or price filters.
 - Unsupported operations return a generic error envelope; no raw exception or
   request payload is sent back or logged by the worker.
 - The request queue is durable `catalog_store`; replies use a server-named exclusive

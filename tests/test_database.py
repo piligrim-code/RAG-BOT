@@ -32,6 +32,24 @@ def test_real_sql_catalog_and_case_insensitive_filter(database):
     assert len(database.extract_catalog({"\u0426\u0435\u043d\u0430": {"<": 15}})) == 1
 
 
+@pytest.mark.parametrize("sku_first", [True, False])
+@pytest.mark.parametrize("matching", [True, False])
+def test_sku_does_not_override_other_filters_or_depend_on_key_order(database, sku_first, matching):
+    sku = "\u0410\u0440\u0442\u0438\u043a\u0443\u043b"
+    category = "\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044f"
+    price = "\u0426\u0435\u043d\u0430"
+    entries = [(sku, "probe-a"), (category, "Alpha" if matching else "Beta"), (price, {"<": 15})]
+    filters = dict(entries if sku_first else reversed(entries))
+    rows = database.extract_catalog(filters)
+    assert [row[sku] for row in rows] == (["probe-a"] if matching else [])
+
+
+@pytest.mark.parametrize("sku_first", [True, False])
+def test_sku_does_not_bypass_price_filter(database, sku_first):
+    entries = [("\u0410\u0440\u0442\u0438\u043a\u0443\u043b", "probe-a"), ("\u0426\u0435\u043d\u0430", {">": 15})]
+    assert database.extract_catalog(dict(entries if sku_first else reversed(entries))) == []
+
+
 def test_bad_filter_does_not_prevent_next_request(database):
     with pytest.raises(AttributeError):
         database.extract_catalog({"\u0426\u0435\u043d\u0430": "invalid"})

@@ -57,7 +57,6 @@ class DBClient:
                 for param_name, param_value in parameters.items():
                     if param_name == "Артикул":
                         f_catalog = f_catalog.filter(func.lower(Catalog.art) == func.lower(param_value))
-                        break
                     elif param_name == "Категория":
                         f_catalog = f_catalog.filter(func.lower(Catalog.cat) == func.lower(param_value))
                     elif param_name == "Описание":

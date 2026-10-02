@@ -104,6 +104,22 @@ def test_concurrent_clients_keep_correlation_isolated(database):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("sku_first", [True, False])
+def test_sku_combines_with_other_filters_regardless_of_json_order(database, sku_first):
+    async def scenario():
+        async with stack(database) as client:
+            sku = "\u0410\u0440\u0442\u0438\u043a\u0443\u043b"
+            category = "\u041a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044f"
+            price = "\u0426\u0435\u043d\u0430"
+            for filters, expected in [([(sku, "synthetic-a"), (category, "Beta")], []),
+                                      ([(sku, "synthetic-a"), (price, {">": 15})], []),
+                                      ([(sku, "synthetic-a"), (category, "Alpha"), (price, {"<": 15})], ["synthetic-a"])]:
+                request = dict(filters if sku_first else reversed(filters))
+                rows = await client.call({"extract_catalog": request})
+                assert [row[sku] for row in rows] == expected
+    asyncio.run(scenario())
+
+
 def test_sql_error_and_unsupported_request_do_not_poison_worker(database):
     from rabbitclient import RpcRemoteError
 
