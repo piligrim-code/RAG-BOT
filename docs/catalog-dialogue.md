@@ -45,11 +45,12 @@ clarification with empty state without querying the catalog. An unchanged
 nonempty filter set can still be searched. Zero matches with valid constraints
 is a normal result, not an infrastructure error.
 
-The caller owns persistence. The historical Telegram text handler sends the
+The caller owns persistence. The Telegram text handler sends the
 reply before saving the new filter state. Failed extraction, lookup or reply
 does not intentionally advance that state. Delivery followed by a state-store
-failure is still ambiguous. Same-chat serialization, durable state, replay
-protection and exactly-once notification guarantees are not implemented here.
+failure is still ambiguous. The adapter now serializes same-session handlers
+inside one process. Durable state, cross-process serialization, replay protection
+and exactly-once notification guarantees are not implemented here.
 
 ## HTTP And RPC Limits
 
@@ -93,6 +94,10 @@ and PostgreSQL, including follow-up constraints and recovery after SQL errors.
 
 All model replies are predetermined fixtures. No weights, customer records,
 provider credentials or Telegram delivery are involved. Real relevance/quality,
-the legacy vector server, bot polling/lifecycle, broker restarts,
-concurrency, migrations, authentication and operational deployment remain
+the legacy vector server, multi-process delivery/concurrency, migrations,
+authentication and operational deployment remain
 separate qualification tasks. No existing database or queue was migrated here.
+
+The bot lifecycle is exercised with the actual aiogram dispatcher and a strict
+in-memory Telegram transport; see `bot-lifecycle.md`. Owned RabbitMQ application
+restart scenarios and their limits are described in `broker-recovery.md`.

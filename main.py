@@ -1,193 +1,212 @@
-from dotenv import load_dotenv
-import os
+"""Import-safe Telegram adapter for the tested catalog workflow."""
 import asyncio
+from contextlib import AsyncExitStack
 import logging
-import json
-import uuid
+import os
+
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.enums import ParseMode
-from aiogram.filters import BaseFilter
-from aiogram.filters.command import Command
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove, ContentType, ReplyKeyboardMarkup, BufferedInputFile
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.dispatcher.event.bases import UNHANDLED
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from rabbitclient import RpcClient
-from llm import extract_filter_patch
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from dotenv import load_dotenv
+
+from bot_sessions import BotSessions, SessionCapacityError
+from catalog_filters import FilterValidationError, validate_text
 from conversation import run_catalog_turn
-from catalog_filters import FilterValidationError
+from llm import extract_filter_patch
+from rabbitclient import RpcClient
 
-load_dotenv() 
-
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")
-
-rpc_client = RpcClient()
-
-# Включаем логирование, чтобы не пропустить важные сообщения
-logging.basicConfig(level=logging.INFO)
-
-# Объект бота
-bot = Bot(TOKEN)
-# Диспетчер
-dp = Dispatcher()
-def make_reply_keyboard(button_name_rows):
-    button_rows = []
-    for button_name_row in button_name_rows:
-        button_rows.append([KeyboardButton(text=text) for text in button_name_row])
-    keyboard = ReplyKeyboardMarkup(keyboard=button_rows, resize_keyboard=True)
-    return keyboard
 
 class AskQuestion(StatesGroup):
     question = State()
 
-@dp.message(Command("start"))
-async def start_func(message: types.Message, state: FSMContext):
-    await state.clear()
+
+class CatalogDispatcher(Dispatcher):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.active_updates = set()
+        self.closing = False
+
+    async def feed_update(self, bot, update, **kwargs):
+        if self.closing:
+            return UNHANDLED
+        task = asyncio.current_task()
+        self.active_updates.add(task)
+        try:
+            return await super().feed_update(bot, update, **kwargs)
+        finally:
+            self.active_updates.discard(task)
+
+    async def emit_shutdown(self, *args, **kwargs):
+        self.closing = True
+        pending = tuple(task for task in self.active_updates if task is not asyncio.current_task())
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await super().emit_shutdown(*args, **kwargs)
+
+
+def menu():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Посмотреть каталог")],
+        [KeyboardButton(text="Связь с оператором")],
+    ], resize_keyboard=True)
+
+
+async def catalog_reply(message: types.Message, state: FSMContext, rpc_client, extract):
     user_data = await state.get_data()
-    dialog_id = str(uuid.uuid4())
-    messages = user_data.get("messages", [])
-    messages.append({"role": "assistant", "content": "Добрый день! Что бы вы хотели??"})
-    keyboard = make_reply_keyboard([["Посмотреть каталог"], ["Связь с оператором"]])
-    await state.update_data(dialog_id=dialog_id)
-    await state.update_data(messages=messages)
-    await message.answer("Добрый день! Что бы вы хотели??", reply_markup=keyboard)
-
-
-@dp.message(F.text == "Посмотреть каталог")
-async def message_reply(message: types.Message):
-    keyboard = make_reply_keyboard([["Диски"], ["Пороховое и газовое оборудование"], ["Наши СТМ"], ["Прочее"]])
-    await message.answer("Хорошо, мы занимаемся продажей алмазного оборудования, выберите категорию из списка ниже", reply_markup=keyboard)
-
-def make_inline_keyboard():
-    button1 = InlineKeyboardButton(
-        text="Резать металл",
-        callback_data="metal"
-    )
-    button2 = InlineKeyboardButton(
-        text="Резать дерево",
-        callback_data="wood"
-    )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[button1, button2]])
-    return keyboard
-
-def make_metal_keyboard():
-    button3 = InlineKeyboardButton(
-        text="Отрезные круги",
-        callback_data="cutting_circles"
-    )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[button3]])
-    return keyboard
-
-def make_STM_keyboard():
-    button4 = InlineKeyboardButton(
-        text="Насадки",
-        callback_data="nozzle"
-    )
-    button5 = InlineKeyboardButton(
-        text="Заусовщики",
-        callback_data="zausovshchik"
-    )
-    button6 = InlineKeyboardButton(
-        text="Пылеотвод",
-        callback_data="dust_collector"
-    )
-    button7 = InlineKeyboardButton(
-        text="Отрезные круги",
-        callback_data="cutting_wheels"
-    )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[button4, button5, button6, button7 ]])
-    return keyboard
-
-@dp.message(F.text == "Диски")
-async def message_reply(message: types.Message):
-    keyboard = make_inline_keyboard()
-    await message.answer("Какая категория дисков вас интересует?", reply_markup=keyboard)
-
-@dp.callback_query(F.data == "metal")
-async def process_metal_callback(callback_query: types.CallbackQuery):
-    keyboard = make_metal_keyboard()
-    await callback_query.message.edit_text("Вы выбрали 'Резать металл'. Что вас интересует?", reply_markup=keyboard)
-
-@dp.callback_query(F.data == "wood")
-async def process_wood_callback(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("Вы выбрали 'Резать дерево'.")
-
-@dp.callback_query(F.data == "cutting_circles")
-async def process_cutting_circles_callback(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("Вы выбрали 'Отрезные круги'.")
-
-@dp.message(F.text == "Наши СТМ")
-async def message_reply(message: types.Message):
-    keyboard = make_STM_keyboard()
-    await message.answer("Что из наших СТМ вас интересует?", reply_markup=keyboard)
-
-@dp.callback_query(F.data == "nozzle")
-async def process_metal_callback(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("Вы выбрали 'Насадки'. Что вас интересует?")
-
-@dp.callback_query(F.data == "zausovshchik")
-async def process_metal_callback(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("Вы выбрали 'Заусовщики'. Что вас интересует?")
-
-@dp.callback_query(F.data == "dust_collector")
-async def process_metal_callback(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("Вы выбрали 'Пылеоотводы'. Что вас интересует?")
-
-@dp.callback_query(F.data == "cutting_wheels")
-async def process_metal_callback(callback_query: types.CallbackQuery):
-    await callback_query.message.edit_text("Вы выбрали 'Отрезные круги'. Что вас интересует?")
-
-
-@dp.message(F.text =="Связь с оператором")
-async def operator_reply(message: types.Message, state: FSMContext):
-    await message.answer("Задайте ваш вопрос оператору:", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(AskQuestion.question)
-
-# Хэндлер для сбора вопроса
-@dp.message(AskQuestion.question)
-async def process_question(message: types.Message, state: FSMContext):
-    question = message.text
-    await state.update_data(question=question)
-
-    # Отправляем сообщение в группу
-    username = message.from_user.username
-    user_mention = f"@{username}" 
-    await bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"Пользователь {message.from_user.first_name} ({message.from_user.username}) хочет связаться с оператором. \nID пользователя: {user_mention}\nВопрос: {question}"
-    )
-    await message.answer("Оператор скоро вам напишет, ожидайте.", reply_markup=ReplyKeyboardRemove())
-    await state.clear()
-
-@dp.message(F.content_type == ContentType.TEXT)
-async def message_reply(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    user_id = message.from_user.id
-    dialog_id = user_data.get("dialog_id")
-    messages = user_data.get("messages", [])
     try:
         turn = await run_catalog_turn(
             message.text, user_data.get("catalog_params", {}),
-            extract=extract_filter_patch, rpc_client=rpc_client)
+            extract=extract, rpc_client=rpc_client)
     except FilterValidationError:
-        await message.answer("Please specify a SKU, category, description or integer price range.")
+        await message.answer("Укажите артикул, категорию, описание или целочисленный диапазон цены.")
         return
     except Exception as error:
         logging.warning("Catalog flow failed (%s)", type(error).__name__)
-        await message.answer("Catalog service is unavailable. Please try again later.")
+        await message.answer("Каталог временно недоступен. Попробуйте позже.")
         return
     await message.answer(turn.reply)
     await state.update_data(catalog_params=turn.filters)
 
 
-# Запуск процесса поллинга новых апдейтов
-async def main():
+def create_dispatcher(rpc_client, *, extract=extract_filter_patch, admin_id=None, sessions=None):
+    if admin_id is not None and (type(admin_id) is not int or admin_id == 0):
+        raise ValueError("admin_id must be a nonzero integer or None")
+    sessions = sessions if sessions is not None else BotSessions()
+    dp = CatalogDispatcher(storage=sessions, events_isolation=sessions,
+                           rpc_client=rpc_client, extract=extract)
+    # The public adapter supports private chats only; group state is not qualified.
+    dp.message.filter(F.chat.type == "private", F.from_user)
+
+    @dp.errors()
+    async def capacity_error(event: types.ErrorEvent):
+        if not isinstance(event.exception, SessionCapacityError):
+            raise event.exception
+        if event.update.message is not None and event.update.message.chat.type == "private":
+            await event.update.message.answer("Сервис занят. Попробуйте позже.")
+        return True
+
+    @dp.message(Command("start", "forget", "cancel"))
+    async def reset(message: types.Message, state: FSMContext):
+        await state.clear()
+        await message.answer("Фильтры сброшены. Напишите, какой товар вы ищете.", reply_markup=menu())
+
+    @dp.message(Command("help"))
+    @dp.message(F.text == "Посмотреть каталог")
+    async def catalog_help(message: types.Message):
+        await message.answer("Укажите артикул, категорию или цену. /forget сбрасывает текущие фильтры.")
+
+    @dp.message(Command("operator"))
+    @dp.message(F.text == "Связь с оператором")
+    async def operator(message: types.Message, state: FSMContext):
+        if admin_id is None:
+            await message.answer("Связь с оператором не настроена.")
+            return
+        await message.answer(
+            "Следующее текстовое сообщение и ваш Telegram ID будут переданы оператору. "
+            "Не отправляйте пароли и платёжные данные. /cancel отменяет отправку.",
+            reply_markup=ReplyKeyboardRemove())
+        await state.set_state(AskQuestion.question)
+
+    @dp.message(AskQuestion.question, F.text, ~F.text.startswith("/"))
+    async def question(message: types.Message, state: FSMContext, bot: Bot):
+        try:
+            validate_text(message.text, 3500)
+            if len(message.text.encode("utf-16-le")) > 7000:
+                raise FilterValidationError("Question exceeds Telegram text limit")
+        except FilterValidationError:
+            await message.answer("Вопрос должен содержать от 1 до 3500 символов.")
+            return
+        await bot.send_message(admin_id, f"Telegram ID: {message.from_user.id}\n{message.text}")
+        # Do not retain the question or auto-forward it again after reply failure.
+        await state.set_state(None)
+        await message.answer("Вопрос передан оператору.", reply_markup=menu())
+
+    @dp.message(AskQuestion.question)
+    async def question_needs_text(message: types.Message):
+        await message.answer("Отправьте вопрос текстом или используйте /cancel.")
+
+    @dp.message(F.text.startswith("/"))
+    async def unknown_command(message: types.Message):
+        await message.answer("Доступные команды: /start, /forget, /operator, /cancel, /help.")
+
+    dp.message.register(catalog_reply, F.text)
+
+    @dp.message()
+    async def needs_text(message: types.Message):
+        await message.answer("Поиск по каталогу принимает текстовые сообщения.")
+
+    @dp.callback_query()
+    async def old_menu(callback: types.CallbackQuery):
+        await callback.answer("Напишите запрос текстом или используйте /start.")
+
+    return dp
+
+
+async def _stop_and_close(bot, dp, rpc_client, polling):
+    # Cleanup also covers startup failure, before aiogram's shutdown hooks run.
+    async with AsyncExitStack() as cleanup:
+        cleanup.push_async_callback(bot.session.close)
+        cleanup.push_async_callback(rpc_client.close)
+        cleanup.push_async_callback(dp.emit_shutdown, bot=bot)
+        if not polling.done():
+            stopper = asyncio.create_task(dp.stop_polling())
+            try:
+                done, _ = await asyncio.wait((polling, stopper), return_when=asyncio.FIRST_COMPLETED)
+                if stopper in done:
+                    try:
+                        await stopper
+                    except RuntimeError:
+                        # Cancellation may precede the polling task's first instruction.
+                        polling.cancel()
+                await asyncio.gather(polling, return_exceptions=True)
+            finally:
+                if not stopper.done():
+                    stopper.cancel()
+                await asyncio.gather(stopper, return_exceptions=True)
+
+
+async def run_polling(bot, dp, rpc_client):
+    polling = asyncio.create_task(dp.start_polling(
+        bot, close_bot_session=False, tasks_concurrency_limit=32))
     try:
-        await dp.start_polling(bot)
+        await asyncio.shield(polling)
     finally:
-        await rpc_client.close()
+        closing = asyncio.create_task(_stop_and_close(bot, dp, rpc_client, polling))
+        cancelled = False
+        while not closing.done():
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                cancelled = True
+        closing.result()
+        if cancelled:
+            raise asyncio.CancelledError()
+
+
+async def main():
+    load_dotenv()
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        raise ValueError("Set BOT_TOKEN before starting the Telegram adapter")
+    raw_admin = os.environ.get("ADMIN_ID")
+    try:
+        admin_id = None if not raw_admin else int(raw_admin)
+        if admin_id == 0:
+            raise ValueError()
+    except ValueError:
+        raise ValueError("ADMIN_ID must be a nonzero integer when configured") from None
+    rpc_client = RpcClient()
+    dp = create_dispatcher(rpc_client, admin_id=admin_id)
+    bot = Bot(token, session=AiohttpSession(timeout=15))
+    await run_polling(bot, dp, rpc_client)
+
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())

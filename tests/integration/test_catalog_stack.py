@@ -286,6 +286,48 @@ def test_next_call_reconnects_after_connection_is_closed(database):
     asyncio.run(scenario())
 
 
+def test_aiogram_dispatch_through_http_amqp_sql_and_reset(database):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    from catalog_filters import CATEGORY, PRICE
+    from llm import extract_filter_patch
+    from main import create_dispatcher
+    from tests.bot_transport import synthetic_bot, update
+
+    async def scenario():
+        contexts = []
+        patches = {"first": {"category": "Alpha"}, "next": {"price": {"<": 10}}}
+        async def generate(request):
+            context = json.loads((await request.json())["content"].splitlines()[-1])
+            contexts.append(context)
+            return web.json_response({"res_content": json.dumps(patches[context["query"]])})
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        async with TestServer(app) as server:
+            async def extract(query, filters):
+                return await extract_filter_patch(query, filters, url=str(server.make_url("/generate")))
+            async with stack(database) as client:
+                bot, telegram = synthetic_bot()
+                dp = create_dispatcher(client, extract=extract)
+                try:
+                    await dp.feed_update(bot, update("/start"))
+                    await dp.feed_update(bot, update("first", update_id=2))
+                    assert "synthetic-a" in telegram.sent[-1].text
+                    await dp.feed_update(bot, update("next", update_id=3))
+                    assert "No matching products" in telegram.sent[-1].text
+                    assert contexts[-1]["previous_filters"] == {CATEGORY: "Alpha"}
+                    state = dp.fsm.get_context(bot=bot, chat_id=101, user_id=101)
+                    assert (await state.get_data())["catalog_params"] == {
+                        CATEGORY: "Alpha", PRICE: {"<": 10}}
+                    await dp.feed_update(bot, update("/forget", update_id=4))
+                    assert not dp.storage.sessions and not client.futures
+                finally:
+                    await dp.emit_shutdown(bot=bot)
+                    await bot.session.close()
+                assert telegram.closed and not dp.active_updates
+    asyncio.run(scenario())
+
+
 def test_database_statement_deadline_and_next_session_recovery(database):
     from db_client import DBClient
     from sqlalchemy import text
