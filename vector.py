@@ -27,7 +27,7 @@ if os.path.exists("/data/catalog_vectordb"):
     )
 else:
     db_client = DBClient()
-    catalog = db_client.extract_catalog()
+    catalog = db_client.extract_catalog(limit=None)
     texts = ["\n".join([f"{param_name}: {param_value}"
             for param_name, param_value in cat.items()]) for cat in catalog]
 

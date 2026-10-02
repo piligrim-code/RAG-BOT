@@ -14,8 +14,9 @@ from aiogram.types import KeyboardButton, InlineKeyboardButton, InlineKeyboardMa
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from rabbitclient import RpcClient
-from catalog_service import catalog_reply
-from llm import slot_fill
+from llm import extract_filter_patch
+from conversation import run_catalog_turn
+from catalog_filters import FilterValidationError
 
 load_dotenv() 
 
@@ -167,14 +168,18 @@ async def message_reply(message: types.Message, state: FSMContext):
     dialog_id = user_data.get("dialog_id")
     messages = user_data.get("messages", [])
     try:
-        param_dict = await slot_fill(user_data, message)
-        reply = await catalog_reply(param_dict, rpc_client)
+        turn = await run_catalog_turn(
+            message.text, user_data.get("catalog_params", {}),
+            extract=extract_filter_patch, rpc_client=rpc_client)
+    except FilterValidationError:
+        await message.answer("Please specify a SKU, category, description or integer price range.")
+        return
     except Exception as error:
         logging.warning("Catalog flow failed (%s)", type(error).__name__)
         await message.answer("Catalog service is unavailable. Please try again later.")
         return
-    await state.update_data(catalog_params=param_dict)
-    await message.answer(reply)
+    await message.answer(turn.reply)
+    await state.update_data(catalog_params=turn.filters)
 
 
 # Запуск процесса поллинга новых апдейтов

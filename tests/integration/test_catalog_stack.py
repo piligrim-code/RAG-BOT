@@ -120,7 +120,7 @@ def test_sku_combines_with_other_filters_regardless_of_json_order(database, sku_
     asyncio.run(scenario())
 
 
-def test_sql_error_and_unsupported_request_do_not_poison_worker(database):
+def test_bad_filters_and_unsupported_request_do_not_poison_worker(database):
     from rabbitclient import RpcRemoteError
 
     async def scenario():
@@ -130,6 +130,100 @@ def test_sql_error_and_unsupported_request_do_not_poison_worker(database):
                     await client.call(payload)
                 assert len(await client.call({"extract_catalog": {}})) == 2
             assert not client.futures
+    asyncio.run(scenario())
+
+
+def test_actual_sql_error_is_isolated_from_next_request(database):
+    from rabbitclient import RpcRemoteError
+    from sqlalchemy import text
+
+    async def scenario():
+        async with stack(database) as client:
+            with database.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE products_trio RENAME COLUMN price TO hidden_price"))
+            try:
+                with pytest.raises(RpcRemoteError, match="rejected"):
+                    await client.call({"extract_catalog": {}})
+            finally:
+                with database.engine.begin() as connection:
+                    connection.execute(text("ALTER TABLE products_trio RENAME COLUMN hidden_price TO price"))
+            assert len(await client.call({"extract_catalog": {}})) == 2
+    asyncio.run(scenario())
+
+
+def test_aliases_inclusive_prices_and_unknown_filters_over_real_rpc(database):
+    from catalog_filters import SKU
+    from rabbitclient import RpcRemoteError
+
+    async def scenario():
+        async with stack(database) as client:
+            for filters, expected in [
+                ({"sku": "SYNTHETIC-A", "price": {"<=": 10}}, ["synthetic-a"]),
+                ({"category": "Beta", "price": {">=": 20}}, ["synthetic-b"]),
+                ({"price": {"=": 10}}, ["synthetic-a"]),
+            ]:
+                result = await client.call({"extract_catalog": filters})
+                assert [row[SKU] for row in result] == expected
+            for filters in [{"brand": "unsupported"}, {"price": {">": 20, "<=": 20}},
+                            {"sku": "synthetic-a", SKU: "synthetic-b"}]:
+                with pytest.raises(RpcRemoteError, match="rejected"):
+                    await client.call({"extract_catalog": filters})
+            assert len(await client.call({"extract_catalog": {}})) == 2
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("body", [b'{"extract_catalog":{},"extract_catalog":{"sku":"synthetic-b"}}',
+                                b"x" * 16385])
+def test_duplicate_or_oversized_wire_request_is_rejected(database, body):
+    from aio_pika import Message
+
+    async def scenario():
+        async with stack(database) as client:
+            await client.connect()
+            correlation_id = uuid.uuid4().hex
+            future = asyncio.get_running_loop().create_future()
+            client.futures[correlation_id] = future
+            await client.channel.default_exchange.publish(
+                Message(body, correlation_id=correlation_id, reply_to=client.callback_queue.name),
+                routing_key=client.request_queue)
+            assert json.loads(await asyncio.wait_for(future, 5)) == {"error": {"code": "invalid_request"}}
+            assert len(await client.call({"extract_catalog": {}})) == 2
+    asyncio.run(scenario())
+
+
+def test_http_model_to_amqp_sql_and_followup_state(database):
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+    from catalog_filters import CATEGORY, PRICE, SKU
+    from conversation import run_catalog_turn
+    from llm import extract_filter_patch
+
+    async def scenario():
+        patches = {
+            "first": {"category": "Alpha", "price": {"<=": 10}},
+            "conflict": {"sku": "synthetic-b"},
+            "revise": {"sku": None, "category": "Beta", "price": {">=": 20}},
+        }
+        received = []
+        async def generate(request):
+            context = json.loads((await request.json())["content"].splitlines()[-1])
+            received.append(context)
+            return web.json_response({"res_content": json.dumps(patches[context["query"]])})
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        async with TestServer(app) as server:
+            async def extract(query, filters):
+                return await extract_filter_patch(query, filters, url=str(server.make_url("/generate")))
+            async with stack(database) as client:
+                first = await run_catalog_turn("first", {}, extract=extract, rpc_client=client)
+                assert "synthetic-a" in first.reply and "synthetic-b" not in first.reply
+                second = await run_catalog_turn("conflict", first.filters, extract=extract, rpc_client=client)
+                assert "No matching products" in second.reply
+                third = await run_catalog_turn("revise", second.filters, extract=extract, rpc_client=client)
+                assert "synthetic-b" in third.reply and "synthetic-a" not in third.reply
+                assert first.filters == {CATEGORY: "Alpha", PRICE: {"<=": 10}}
+                assert second.filters[SKU] == "synthetic-b" and SKU not in third.filters
+                assert received[1]["previous_filters"] == first.filters
     asyncio.run(scenario())
 
 

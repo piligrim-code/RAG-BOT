@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 
 import db_client
 import rabbitmq
+from catalog_filters import FilterValidationError, PRICE, SKU, CATALOG_LIMIT
 
 
 @pytest.fixture
@@ -51,9 +52,40 @@ def test_sku_does_not_bypass_price_filter(database, sku_first):
 
 
 def test_bad_filter_does_not_prevent_next_request(database):
-    with pytest.raises(AttributeError):
+    with pytest.raises(FilterValidationError):
         database.extract_catalog({"\u0426\u0435\u043d\u0430": "invalid"})
     assert len(database.extract_catalog()) == 2
+
+
+@pytest.mark.parametrize("filters,expected", [({"sku": "PROBE-A"}, ["probe-a"]),
+    ({"price": {"=": 10}}, ["probe-a"]), ({"price": {"<=": 10}}, ["probe-a"]),
+    ({"price": {">=": 20}}, ["probe-b"])])
+def test_normalized_and_inclusive_filters(database, filters, expected):
+    assert [item[SKU] for item in database.extract_catalog(filters)] == expected
+
+
+def test_invalid_filters_are_rejected_before_opening_session(database, monkeypatch):
+    session = Mock()
+    monkeypatch.setattr(database, "Session", session)
+    with pytest.raises(FilterValidationError):
+        database.extract_catalog({"brand": "unsupported"})
+    session.assert_not_called()
+
+
+def test_lookup_is_bounded_but_explicit_export_is_complete(database):
+    with database.Session.begin() as session:
+        session.add_all([db_client.Catalog(art=f"extra-{index:03d}", cat="Synthetic",
+                        descr="Synthetic extra", price=1) for index in range(105)])
+    result = database.extract_catalog()
+    assert len(result) == CATALOG_LIMIT
+    assert [item[SKU] for item in result] == sorted(item[SKU] for item in result)
+    assert len(database.extract_catalog(limit=None)) == 107
+
+
+@pytest.mark.parametrize("limit", [0, True, -1, 1001, 2.5])
+def test_bad_result_limit(database, limit):
+    with pytest.raises(ValueError):
+        database.extract_catalog(limit=limit)
 
 
 def test_failed_schema_initialization_disposes_engine(monkeypatch):
