@@ -122,6 +122,10 @@ celerybeat.pid
 
 # Environments
 .env
+data/
+models/
+indexes/
+*.gguf
 .venv
 env/
 venv/

@@ -3,8 +3,9 @@
 A historical Telegram sales-assistant prototype. The tested public slice is
 validated catalog dialogue, model-service HTTP parsing, RabbitMQ/SQL lookup and
 an import-safe Telegram adapter tested with an in-memory transport, not a complete
-RAG product. The old diagram and model/vector experiments are
-historical context; real model quality and Telegram delivery remain unqualified.
+RAG product. The optional local model/vector service now has explicit assets,
+bounded process lifecycle and real Chroma fixture tests. Real model quality,
+learned-embedding relevance and Telegram delivery remain unqualified.
 
 ## Offline Demo
 
@@ -86,8 +87,8 @@ fully locked production environment.
 - Russian field names and explicit English aliases are normalized consistently
   before model/RPC/SQL use. Unknown fields, alias collisions, malformed prices,
   contradictory ranges and duplicate JSON keys fail instead of being ignored.
-- Catalog lookups return at most 100 rows ordered by SKU. The legacy vector
-  export opts into `limit=None` explicitly; that experiment remains unqualified.
+- Catalog lookups return at most 100 rows ordered by SKU. The optional vector
+  index is built from an explicit reviewed JSON snapshot, not a live database export.
 - Unsupported operations return a generic error envelope; no raw exception or
   request payload is sent back or logged by the worker.
 - The request queue is durable `catalog_store`; replies use a server-named exclusive
@@ -139,9 +140,10 @@ Configure these privately in the process environment or an untracked `.env`:
 
 The slot extractor expects the historical custom HTTP API: POST
 `{"content": "..."}` and response `{"res_content": "<JSON filters>"}`.
-This is not the native llama.cpp API. The historical `vector.py` experiment is
-not a qualified deployment of this contract; provision/review the model service
-separately. Requests have a 30-second total timeout, shorter connect/read limits,
+This is not the native llama.cpp API. The optional `vector.py` service implements
+this envelope with explicit local assets and an owned native-model process; see
+`docs/model-service.md` for startup, indexing and its qualification limits.
+Client requests have a 30-second total timeout, shorter connect/read limits,
 no redirects/retries, no environment proxy use, and a 16 KiB response limit.
 Raw responses and filter values are not logged by the extractor.
 
@@ -165,10 +167,21 @@ python main.py
 
 Do not use real customer data as the first integration test. Database schema
 migrations, real model interpretation quality, authentication,
-cluster failover, vector retrieval, production concurrency
+cluster failover, real retrieval relevance, production concurrency
 and data-retention policies still need a separate review. The stored legacy
 dialog helper methods reference models not supplied by this snapshot and are
 not part of the corrected catalog contract.
 
-No Telegram or real LLM is contacted in either suite. HTTP fixtures listen on
-loopback only; the opt-in suite also uses its runner's disposable DB and broker.
+No Telegram or real LLM is contacted by the suites. HTTP fixtures listen on
+loopback only; SQL/AMQP tests use disposable DB/broker resources. Optional Chroma
+tests use temporary local indexes and fixed synthetic vectors:
+
+```sh
+python -m pip install -r requirements-vector-test.txt
+python tools/run_vector_tests.py
+```
+
+The optional service supports `/generate`, `/retrieve` and `/health`. It neither
+downloads weights nor implicitly opens a legacy index. `requirements-model.txt`
+is separate from the bot/worker dependencies; actual inference still requires
+reviewed local models and platform qualification. See `docs/model-service.md`.

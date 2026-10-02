@@ -74,8 +74,8 @@ and exactly-once notification guarantees are not implemented here.
   is not a broker-wide message-memory limit.
 - Database lookups default to 100 rows, ordered by SKU. The direct library
   supports an explicit 1..1,000 limit or `None` for a deliberately unbounded
-  export. RPC filters cannot select that export mode. The historical vector
-  indexer opts into full export to avoid silently indexing only the first page.
+  export. RPC filters cannot select that export mode. The optional vector indexer
+  now requires an explicit reviewed JSON snapshot and does not open the database.
 - Replies show at most three retrieved products, not every matching product,
   and are bounded to 3,500 UTF-16 units. There is no pagination/total-match count.
 
@@ -94,10 +94,12 @@ and PostgreSQL, including follow-up constraints and recovery after SQL errors.
 
 All model replies are predetermined fixtures. No weights, customer records,
 provider credentials or Telegram delivery are involved. Real relevance/quality,
-the legacy vector server, multi-process delivery/concurrency, migrations,
+real model/embedding quality, multi-process delivery/concurrency, migrations,
 authentication and operational deployment remain
 separate qualification tasks. No existing database or queue was migrated here.
 
 The bot lifecycle is exercised with the actual aiogram dispatcher and a strict
 in-memory Telegram transport; see `bot-lifecycle.md`. Owned RabbitMQ application
 restart scenarios and their limits are described in `broker-recovery.md`.
+The optional local model/vector service and actual Chroma fixture coverage are
+documented in `model-service.md`; the bot does not automatically use `/retrieve`.
