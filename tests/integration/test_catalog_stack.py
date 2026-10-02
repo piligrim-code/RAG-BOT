@@ -388,6 +388,7 @@ async def wait_for_restored_consumer(client, worker):
 @pytest.mark.parametrize("inflight", [False, True])
 def test_owned_broker_application_restart_recovers_new_calls(database, monkeypatch, inflight):
     from aio_pika.exceptions import AMQPError
+    from rabbitclient import RpcRemoteError
     from tools.broker_probe import OwnedBroker
 
     broker = OwnedBroker()
@@ -422,7 +423,7 @@ def test_owned_broker_application_restart_recovers_new_calls(database, monkeypat
                 await asyncio.to_thread(broker.stop)
                 release.set()
                 if pending is not None:
-                    with pytest.raises((TimeoutError, AMQPError, ConnectionError)):
+                    with pytest.raises((TimeoutError, AMQPError, ConnectionError, RpcRemoteError)):
                         await pending
                     assert not client.futures
                 # Mark before invocation: an uncertain start result is not retried.
