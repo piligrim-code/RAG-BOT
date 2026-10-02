@@ -135,7 +135,7 @@ Configure these privately in the process environment or an untracked `.env`:
 | --- | --- |
 | RabbitMQ client/worker | `RABBITMQ_URL` (required, no embedded default password) |
 | Telegram adapter | `BOT_TOKEN`; optional `ADMIN_ID` for explicitly requested operator forwarding |
-| PostgreSQL legacy adapter | `username`, `password`, `host`, `port`, `database` |
+| PostgreSQL adapter | `username`, `password`, `host`, `port`, `database` (all required) |
 | Model slot extractor | `LLM_URL` |
 
 The slot extractor expects the historical custom HTTP API: POST
@@ -165,12 +165,17 @@ python rabbitmq.py
 python main.py
 ```
 
+Ordinary worker startup does not initialize a schema. For a deliberately selected
+new catalog database, use `python db_client.py init-schema` with provisioning
+credentials first, then return to read-only runtime credentials. No rows are
+imported by this command. See `docs/database-startup.md` for configuration,
+schema checks, compatibility and recovery limits.
+
 Do not use real customer data as the first integration test. Database schema
 migrations, real model interpretation quality, authentication,
 cluster failover, real retrieval relevance, production concurrency
-and data-retention policies still need a separate review. The stored legacy
-dialog helper methods reference models not supplied by this snapshot and are
-not part of the corrected catalog contract.
+and data-retention policies still need a separate review. The unusable legacy
+dialog helpers are removed; no database chat-persistence API is provided.
 
 No Telegram or real LLM is contacted by the suites. HTTP fixtures listen on
 loopback only; SQL/AMQP tests use disposable DB/broker resources. Optional Chroma
